@@ -251,8 +251,8 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
     lookaheadSamples = 1;  // Minimal lookahead for all modes
     protectionLookaheadSamples = 1;
 
-    // Set total plugin latency based on current mode
-    // MODE 0 (Zero Latency): Report 0 latency to host
+    // Set total plugin latency REPORTED to host based on current mode
+    // MODE 0 (Zero Latency): Report 0 latency to host (residual min-phase latency is acceptable)
     // MODE 1 (Balanced): Report maxModeLatencySamples to host (with compensation)
     // MODE 2 (Linear Phase): Report maxModeLatencySamples to host
     if (processingMode == 0)
@@ -260,15 +260,30 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
     else
         totalLatencySamples = maxModeLatencySamples;  // Balanced and Linear Phase report max
 
-    // Update host with current latency
+    // Set INTERNAL dry signal compensation based on ACTUAL wet path latency
+    // This is what we actually delay the dry signal by to match wet signal phase
+    // MODE 0: Delay dry by actual measured ZL latency (even though we report 0 to host)
+    // MODE 1 & 2: Delay dry by maxModeLatencySamples (matches total wet latency after compensation)
+    if (processingMode == 0)
+        internalDryCompensationSamples = zeroLatencyModeSamples;  // Actual ZL latency for wet/dry phase alignment
+    else
+        internalDryCompensationSamples = maxModeLatencySamples;  // Max latency for Balanced/Linear Phase
+
+    // Update host with current latency (what DAW sees for track alignment)
     setLatencySamples(totalLatencySamples);
 
     // Initialize dry delay buffers (for wet/dry mixing phase alignment)
+    // CRITICAL: Size based on INTERNAL compensation, not host-reported latency!
     for (int ch = 0; ch < 2; ++ch)
     {
-        if (totalLatencySamples > 0)
+        if (internalDryCompensationSamples > 0)
         {
-            dryDelayState[ch].delayBuffer.resize(totalLatencySamples, 0.0);
+            dryDelayState[ch].delayBuffer.resize(internalDryCompensationSamples, 0.0);
+            dryDelayState[ch].writePos = 0;
+        }
+        else
+        {
+            dryDelayState[ch].delayBuffer.clear();
             dryDelayState[ch].writePos = 0;
         }
     }
@@ -467,8 +482,8 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
     // Reset all processor states and allocate lookahead buffers (3ms for all)
     for (int ch = 0; ch < 2; ++ch)
     {
-        // Dry delay compensation (7ms total to match wet signal with protection)
-        dryDelayState[ch].delayBuffer.resize(totalLatencySamples, 0.0);
+        // Dry delay compensation (match wet signal latency for phase-coherent mixing)
+        dryDelayState[ch].delayBuffer.resize(internalDryCompensationSamples, 0.0);
         dryDelayState[ch].writePos = 0;
 
         // Hard Clip lookahead
@@ -722,8 +737,10 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     const SampleType flTrimGain = juce::Decibels::decibelsToGain(flTrimDB);
 
     // Store CLEAN dry signal BEFORE any gain/normalization for transparent wet/dry mixing
-    // Apply delay compensation to match Phase Limiter + Overshoot Suppression latency
-    if (totalLatencySamples > 0)
+    // Apply delay compensation to match ACTUAL wet signal latency (not host-reported latency!)
+    // CRITICAL: Use internalDryCompensationSamples, not totalLatencySamples
+    // This ensures phase-coherent wet/dry mixing even in Zero Latency mode
+    if (internalDryCompensationSamples > 0)
     {
         // Process dry signal through delay line for phase coherence
         dryBuffer.setSize(buffer.getNumChannels(), numSamples, false, false, false);
@@ -743,7 +760,7 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
                 delayState.delayBuffer[delayState.writePos] = static_cast<double>(input[i]);
 
                 // Advance write position (circular buffer)
-                delayState.writePos = (delayState.writePos + 1) % totalLatencySamples;
+                delayState.writePos = (delayState.writePos + 1) % internalDryCompensationSamples;
             }
         }
     }

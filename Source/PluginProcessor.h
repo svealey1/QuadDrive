@@ -198,7 +198,8 @@ private:
     int lookaheadSamples{0};
     int advancedTPLLookaheadSamples{0};      // Lookahead for advanced TPL (1-3ms)
     int protectionLookaheadSamples{0};           // No longer used (overshoot suppression is zero-latency)
-    int totalLatencySamples{0};                  // Total plugin latency for DAW compensation
+    int totalLatencySamples{0};                  // Total plugin latency REPORTED to DAW host
+    int internalDryCompensationSamples{0};       // ACTUAL delay applied to dry signal for wet/dry phase alignment
 
     // Mode-specific latency measurements (in samples at base sample rate)
     int zeroLatencyModeSamples{0};               // Zero Latency mode latency (should be 0 or minimal)

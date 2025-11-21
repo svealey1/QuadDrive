@@ -5,6 +5,22 @@ All notable changes to Quad-Blend Drive will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2025-11-21
+
+### Fixed
+- **CRITICAL: Zero Latency mode wet/dry comb filtering**: Fixed dry signal delay compensation for Zero Latency mode
+  - Separated host-reported latency (`totalLatencySamples`) from internal dry compensation (`internalDryCompensationSamples`)
+  - Zero Latency mode now reports 0 latency to host BUT internally delays dry signal by measured minimum-phase filter latency
+  - Dry signal now properly compensates for actual wet path latency in all modes
+  - Eliminates comb filtering artifacts when using wet/dry mix knob in Zero Latency mode
+  - Wet/dry mixing is now phase-coherent across all three processing modes
+
+### Changed
+- Dry delay buffer sizing now based on `internalDryCompensationSamples` instead of `totalLatencySamples`
+- Zero Latency mode: Dry delayed by `zeroLatencyModeSamples` (~1-5 samples) for phase alignment
+- Balanced/Linear Phase modes: Dry delayed by `maxModeLatencySamples` for phase alignment
+- Host-reported latency remains correct (0 for ZL, max for others) while internal compensation matches actual processing latency
+
 ## [1.2.1] - 2025-11-21
 
 ### Fixed
