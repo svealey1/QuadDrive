@@ -5,6 +5,23 @@ All notable changes to Quad-Blend Drive will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2025-11-21
+
+### Fixed
+- **Latency compensation and phase alignment**: Implemented proper latency compensation across all processing modes
+  - Balanced and Linear Phase modes now report identical latency to DAW host (maximum of the two)
+  - Balanced mode adds delay compensation to match Linear Phase latency for seamless mode switching
+  - Zero Latency mode correctly reports 0 latency to host (no compensation needed)
+  - Dry signal delay properly matches wet signal latency for phase-coherent wet/dry mixing
+  - No more phase cancellation or comb filtering when using wet/dry mix knob
+  - Timeline stays perfectly aligned when switching between Balanced and Linear Phase modes
+
+### Changed
+- All three oversampling filter types are now instantiated simultaneously for accurate latency measurement
+- Mode compensation delay automatically calculated from measured filter group delays
+- Plugin now queries actual oversampling latency using `getLatencyInSamples()` instead of hardcoded values
+- `setLatencySamples()` dynamically updated based on current processing mode
+
 ## [1.2.0] - 2025-11-21
 
 ### Changed

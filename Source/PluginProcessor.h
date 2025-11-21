@@ -182,14 +182,42 @@ private:
     };
     AdvancedTPLState advancedTPLState[2];  // Per channel
 
-    // Overshoot suppression with 8x oversampling (linear-phase FIR)
-    std::unique_ptr<juce::dsp::Oversampling<float>> oversamplingFloat;
-    std::unique_ptr<juce::dsp::Oversampling<double>> oversamplingDouble;
+    // Three oversampling types for three processing modes (8x oversampling)
+    // Zero Latency: Polyphase IIR (minimum-phase, ~0 latency)
+    std::unique_ptr<juce::dsp::Oversampling<float>> oversamplingZeroLatencyFloat;
+    std::unique_ptr<juce::dsp::Oversampling<double>> oversamplingZeroLatencyDouble;
+
+    // Balanced: Halfband Equiripple FIR (~32 samples latency)
+    std::unique_ptr<juce::dsp::Oversampling<float>> oversamplingBalancedFloat;
+    std::unique_ptr<juce::dsp::Oversampling<double>> oversamplingBalancedDouble;
+
+    // Linear Phase: High-order FIR (~128 samples latency, perfect reconstruction)
+    std::unique_ptr<juce::dsp::Oversampling<float>> oversamplingLinearPhaseFloat;
+    std::unique_ptr<juce::dsp::Oversampling<double>> oversamplingLinearPhaseDouble;
 
     int lookaheadSamples{0};
     int advancedTPLLookaheadSamples{0};      // Lookahead for advanced TPL (1-3ms)
     int protectionLookaheadSamples{0};           // No longer used (overshoot suppression is zero-latency)
     int totalLatencySamples{0};                  // Total plugin latency for DAW compensation
+
+    // Mode-specific latency measurements (in samples at base sample rate)
+    int zeroLatencyModeSamples{0};               // Zero Latency mode latency (should be 0 or minimal)
+    int balancedModeLatencySamples{0};           // Balanced mode latency (~32 samples)
+    int linearPhaseModeLatencySamples{0};        // Linear Phase mode latency (~128 samples)
+    int maxModeLatencySamples{0};                // Maximum of Balanced and Linear Phase modes
+
+    // Compensation delays for each mode to match maxModeLatencySamples
+    int zeroLatencyCompensationSamples{0};       // Delay needed for Zero Latency mode (= maxModeLatencySamples)
+    int balancedCompensationSamples{0};          // Delay needed for Balanced mode (= maxModeLatencySamples - balancedModeLatencySamples)
+    int linearPhaseCompensationSamples{0};       // Delay needed for Linear Phase mode (= 0, since it's the max)
+
+    // Mode compensation delay buffers (to time-align modes)
+    struct ModeCompensationState
+    {
+        std::vector<double> delayBuffer;
+        int writePos{0};
+    };
+    ModeCompensationState modeCompensationState[2];  // Per channel
 
     // Dry signal delay compensation buffers (to match 3ms lookahead)
     struct DryDelayState

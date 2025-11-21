@@ -186,80 +186,111 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
     // Get current processing mode
     int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
 
-    // Configure latency and oversampling based on processing mode
+    // Configure oversampling: Create ALL three types for latency measurement and compensation
     constexpr size_t oversamplingFactor = 3;  // 2^3 = 8x oversampling
     constexpr size_t numChannels = 2;
 
-    // MODE 0: Zero Latency (Minimum-Phase)
+    // MODE 0: Zero Latency (Minimum-Phase Polyphase IIR)
+    oversamplingZeroLatencyFloat = std::make_unique<juce::dsp::Oversampling<float>>(
+        numChannels, oversamplingFactor,
+        juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR,
+        false, false);  // No steep filter, no normalization (minimum-phase)
+
+    oversamplingZeroLatencyDouble = std::make_unique<juce::dsp::Oversampling<double>>(
+        numChannels, oversamplingFactor,
+        juce::dsp::Oversampling<double>::filterHalfBandPolyphaseIIR,
+        false, false);
+
+    // MODE 1: Balanced (Halfband Equiripple FIR)
+    oversamplingBalancedFloat = std::make_unique<juce::dsp::Oversampling<float>>(
+        numChannels, oversamplingFactor,
+        juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple,
+        true, false);  // Steep, no normalization
+
+    oversamplingBalancedDouble = std::make_unique<juce::dsp::Oversampling<double>>(
+        numChannels, oversamplingFactor,
+        juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple,
+        true, false);
+
+    // MODE 2: Linear Phase (High-Order FIR with normalization for perfect reconstruction)
+    oversamplingLinearPhaseFloat = std::make_unique<juce::dsp::Oversampling<float>>(
+        numChannels, oversamplingFactor,
+        juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple,
+        true, true);  // Steep + normalization for maximum quality
+
+    oversamplingLinearPhaseDouble = std::make_unique<juce::dsp::Oversampling<double>>(
+        numChannels, oversamplingFactor,
+        juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple,
+        true, true);
+
+    // Initialize all oversampling objects
+    oversamplingZeroLatencyFloat->initProcessing(static_cast<size_t>(samplesPerBlock));
+    oversamplingZeroLatencyDouble->initProcessing(static_cast<size_t>(samplesPerBlock));
+    oversamplingBalancedFloat->initProcessing(static_cast<size_t>(samplesPerBlock));
+    oversamplingBalancedDouble->initProcessing(static_cast<size_t>(samplesPerBlock));
+    oversamplingLinearPhaseFloat->initProcessing(static_cast<size_t>(samplesPerBlock));
+    oversamplingLinearPhaseDouble->initProcessing(static_cast<size_t>(samplesPerBlock));
+
+    // Measure actual latencies (use float versions for measurement)
+    zeroLatencyModeSamples = static_cast<int>(oversamplingZeroLatencyFloat->getLatencyInSamples());
+    balancedModeLatencySamples = static_cast<int>(oversamplingBalancedFloat->getLatencyInSamples());
+    linearPhaseModeLatencySamples = static_cast<int>(oversamplingLinearPhaseFloat->getLatencyInSamples());
+
+    // Calculate maximum latency (Linear Phase should be the highest)
+    maxModeLatencySamples = juce::jmax(balancedModeLatencySamples, linearPhaseModeLatencySamples);
+
+    // Calculate compensation delays for each mode to match maxModeLatencySamples
+    // Zero Latency: reports 0 to host, no compensation needed (true zero latency)
+    // Balanced: add delay to match Linear Phase
+    // Linear Phase: no compensation needed (it's the max)
+    zeroLatencyCompensationSamples = 0;  // Zero Latency mode reports 0, no compensation
+    balancedCompensationSamples = maxModeLatencySamples - balancedModeLatencySamples;
+    linearPhaseCompensationSamples = 0;  // Linear Phase is already the max
+
+    // Set lookahead samples (used for XY processors)
+    lookaheadSamples = 1;  // Minimal lookahead for all modes
+    protectionLookaheadSamples = 1;
+
+    // Set total plugin latency based on current mode
+    // MODE 0 (Zero Latency): Report 0 latency to host
+    // MODE 1 (Balanced): Report maxModeLatencySamples to host (with compensation)
+    // MODE 2 (Linear Phase): Report maxModeLatencySamples to host
     if (processingMode == 0)
-    {
-        lookaheadSamples = 1;  // Minimal delay
-        protectionLookaheadSamples = 1;
-        totalLatencySamples = 0;  // Zero latency
+        totalLatencySamples = 0;  // Zero Latency mode reports 0
+    else
+        totalLatencySamples = maxModeLatencySamples;  // Balanced and Linear Phase report max
 
-        // Minimum-phase polyphase IIR oversampling (no linear-phase FIR)
-        oversamplingFloat = std::make_unique<juce::dsp::Oversampling<float>>(
-            numChannels, oversamplingFactor,
-            juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR,
-            false, false);  // No steep filter, no normalization
+    // Update host with current latency
+    setLatencySamples(totalLatencySamples);
 
-        oversamplingDouble = std::make_unique<juce::dsp::Oversampling<double>>(
-            numChannels, oversamplingFactor,
-            juce::dsp::Oversampling<double>::filterHalfBandPolyphaseIIR,
-            false, false);
-    }
-    // MODE 1: Balanced (Halfband Equiripple - Current System)
-    else if (processingMode == 1)
-    {
-        lookaheadSamples = 1;
-        protectionLookaheadSamples = 1;
-
-        // Calculate FIR latency for halfband equiripple filters
-        // Typical halfband FIR has ~20-40 samples latency at base rate
-        totalLatencySamples = 32;  // Approximate latency for 8x halfband cascade
-
-        // Linear-phase halfband FIR equiripple (original implementation)
-        oversamplingFloat = std::make_unique<juce::dsp::Oversampling<float>>(
-            numChannels, oversamplingFactor,
-            juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple,
-            true, false);  // Steep, but not normalization
-
-        oversamplingDouble = std::make_unique<juce::dsp::Oversampling<double>>(
-            numChannels, oversamplingFactor,
-            juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple,
-            true, false);
-    }
-    // MODE 2: Full Linear-Phase (High-Order FIR, Mastering Grade)
-    else  // processingMode == 2
-    {
-        lookaheadSamples = 1;
-        protectionLookaheadSamples = 1;
-
-        // Higher latency for high-order linear-phase FIR
-        totalLatencySamples = 128;  // Higher latency for pristine linear-phase
-
-        // Maximum quality linear-phase FIR with normalization
-        oversamplingFloat = std::make_unique<juce::dsp::Oversampling<float>>(
-            numChannels, oversamplingFactor,
-            juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple,
-            true, true);  // Steep + normalization for maximum quality
-
-        oversamplingDouble = std::make_unique<juce::dsp::Oversampling<double>>(
-            numChannels, oversamplingFactor,
-            juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple,
-            true, true);
-    }
-
-    oversamplingFloat->initProcessing(static_cast<size_t>(samplesPerBlock));
-    oversamplingDouble->initProcessing(static_cast<size_t>(samplesPerBlock));
-
-    // Initialize dry delay buffers
+    // Initialize dry delay buffers (for wet/dry mixing phase alignment)
     for (int ch = 0; ch < 2; ++ch)
     {
         if (totalLatencySamples > 0)
         {
             dryDelayState[ch].delayBuffer.resize(totalLatencySamples, 0.0);
             dryDelayState[ch].writePos = 0;
+        }
+    }
+
+    // Initialize mode compensation delay buffers (for mode-switching time alignment)
+    // This ensures Balanced and Linear Phase modes have identical latency reporting
+    int modeCompensationDelay = 0;
+    if (processingMode == 1)  // Balanced mode
+        modeCompensationDelay = balancedCompensationSamples;
+    // Linear Phase and Zero Latency modes don't need compensation
+
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        if (modeCompensationDelay > 0)
+        {
+            modeCompensationState[ch].delayBuffer.resize(modeCompensationDelay, 0.0);
+            modeCompensationState[ch].writePos = 0;
+        }
+        else
+        {
+            modeCompensationState[ch].delayBuffer.clear();
+            modeCompensationState[ch].writePos = 0;
         }
     }
 
@@ -902,6 +933,41 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     }
     else
     {
+        // === MODE COMPENSATION DELAY ===
+        // Apply delay to wet signal in Balanced mode to match Linear Phase latency
+        // This ensures switching between Balanced and Linear Phase doesn't shift timeline
+        const int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
+        int modeCompDelay = 0;
+
+        if (processingMode == 1)  // Balanced mode
+            modeCompDelay = balancedCompensationSamples;
+        // Linear Phase and Zero Latency modes don't need compensation
+
+        if (modeCompDelay > 0)
+        {
+            for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+            {
+                auto* data = buffer.getWritePointer(ch);
+                auto& compState = modeCompensationState[ch];
+                auto& delayBuf = compState.delayBuffer;
+                int& writePos = compState.writePos;
+
+                for (int i = 0; i < numSamples; ++i)
+                {
+                    // Store current sample
+                    if (writePos >= 0 && writePos < static_cast<int>(delayBuf.size()))
+                        delayBuf[writePos] = static_cast<double>(data[i]);
+
+                    // Read delayed sample
+                    int readPos = (writePos + 1) % modeCompDelay;
+                    if (readPos >= 0 && readPos < static_cast<int>(delayBuf.size()))
+                        data[i] = static_cast<SampleType>(delayBuf[readPos]);
+
+                    writePos = (writePos + 1) % modeCompDelay;
+                }
+            }
+        }
+
         // Normal mode: Apply output gain and dry/wet mix
         buffer.applyGain(outputGain);
 
@@ -1078,10 +1144,25 @@ void QuadBlendDriveAudioProcessor::processHardClip(juce::AudioBuffer<SampleType>
         return;
     }
 
-    // MODE 1 & 2: Balanced or Linear Phase - use oversampling
-    auto& oversampling = std::is_same<SampleType, float>::value
-        ? reinterpret_cast<juce::dsp::Oversampling<SampleType>&>(*oversamplingFloat)
-        : reinterpret_cast<juce::dsp::Oversampling<SampleType>&>(*oversamplingDouble);
+    // MODE 1 & 2: Balanced or Linear Phase - use mode-specific oversampling
+    juce::dsp::Oversampling<SampleType>* oversamplingPtr = nullptr;
+
+    if (std::is_same<SampleType, float>::value)
+    {
+        if (processingMode == 1)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedFloat.get());
+        else  // processingMode == 2
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseFloat.get());
+    }
+    else
+    {
+        if (processingMode == 1)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedDouble.get());
+        else  // processingMode == 2
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseDouble.get());
+    }
+
+    auto& oversampling = *oversamplingPtr;
 
     // Upsample to 8× for consistent phase response
     auto oversampledBlock = oversampling.processSamplesUp(juce::dsp::AudioBlock<SampleType>(buffer));
@@ -1181,10 +1262,25 @@ void QuadBlendDriveAudioProcessor::processSoftClip(juce::AudioBuffer<SampleType>
         return;
     }
 
-    // MODE 1 & 2: Balanced or Linear Phase - use oversampling
-    auto& oversampling = std::is_same<SampleType, float>::value
-        ? reinterpret_cast<juce::dsp::Oversampling<SampleType>&>(*oversamplingFloat)
-        : reinterpret_cast<juce::dsp::Oversampling<SampleType>&>(*oversamplingDouble);
+    // MODE 1 & 2: Balanced or Linear Phase - use mode-specific oversampling
+    juce::dsp::Oversampling<SampleType>* oversamplingPtr = nullptr;
+
+    if (std::is_same<SampleType, float>::value)
+    {
+        if (processingMode == 1)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedFloat.get());
+        else  // processingMode == 2
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseFloat.get());
+    }
+    else
+    {
+        if (processingMode == 1)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedDouble.get());
+        else  // processingMode == 2
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseDouble.get());
+    }
+
+    auto& oversampling = *oversamplingPtr;
 
     // Upsample to 8× for consistent phase response
     auto oversampledBlock = oversampling.processSamplesUp(juce::dsp::AudioBlock<SampleType>(buffer));
@@ -1362,10 +1458,25 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
         return;
     }
 
-    // MODE 1 & 2: Balanced or Linear Phase - use oversampling
-    auto& oversampling = std::is_same<SampleType, float>::value
-        ? reinterpret_cast<juce::dsp::Oversampling<SampleType>&>(*oversamplingFloat)
-        : reinterpret_cast<juce::dsp::Oversampling<SampleType>&>(*oversamplingDouble);
+    // MODE 1 & 2: Balanced or Linear Phase - use mode-specific oversampling
+    juce::dsp::Oversampling<SampleType>* oversamplingPtr = nullptr;
+
+    if (std::is_same<SampleType, float>::value)
+    {
+        if (processingMode == 1)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedFloat.get());
+        else  // processingMode == 2
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseFloat.get());
+    }
+    else
+    {
+        if (processingMode == 1)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedDouble.get());
+        else  // processingMode == 2
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseDouble.get());
+    }
+
+    auto& oversampling = *oversamplingPtr;
 
     auto oversampledBlock = oversampling.processSamplesUp(juce::dsp::AudioBlock<SampleType>(buffer));
     const int oversampledSamples = static_cast<int>(oversampledBlock.getNumSamples());
@@ -1544,10 +1655,25 @@ void QuadBlendDriveAudioProcessor::processFastLimit(juce::AudioBuffer<SampleType
         return;
     }
 
-    // MODE 1 & 2: Balanced or Linear Phase - use oversampling
-    auto& oversampling = std::is_same<SampleType, float>::value
-        ? reinterpret_cast<juce::dsp::Oversampling<SampleType>&>(*oversamplingFloat)
-        : reinterpret_cast<juce::dsp::Oversampling<SampleType>&>(*oversamplingDouble);
+    // MODE 1 & 2: Balanced or Linear Phase - use mode-specific oversampling
+    juce::dsp::Oversampling<SampleType>* oversamplingPtr = nullptr;
+
+    if (std::is_same<SampleType, float>::value)
+    {
+        if (processingMode == 1)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedFloat.get());
+        else  // processingMode == 2
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseFloat.get());
+    }
+    else
+    {
+        if (processingMode == 1)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedDouble.get());
+        else  // processingMode == 2
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseDouble.get());
+    }
+
+    auto& oversampling = *oversamplingPtr;
 
     auto oversampledBlock = oversampling.processSamplesUp(juce::dsp::AudioBlock<SampleType>(buffer));
     const int oversampledSamples = static_cast<int>(oversampledBlock.getNumSamples());
@@ -1623,10 +1749,30 @@ void QuadBlendDriveAudioProcessor::processOvershootSuppression(juce::AudioBuffer
     const double overshootMarginDB = 0.3;  // Process only the last 0.3 dB
     const double overshootThreshold = ceilingLinear * std::pow(10.0, -overshootMarginDB / 20.0);
 
-    // Get appropriate oversampling object for this sample type
-    auto& oversampling = std::is_same<SampleType, float>::value
-        ? reinterpret_cast<juce::dsp::Oversampling<SampleType>&>(*oversamplingFloat)
-        : reinterpret_cast<juce::dsp::Oversampling<SampleType>&>(*oversamplingDouble);
+    // Get current processing mode and select appropriate oversampling object
+    int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
+    juce::dsp::Oversampling<SampleType>* oversamplingPtr = nullptr;
+
+    if (std::is_same<SampleType, float>::value)
+    {
+        if (processingMode == 0)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingZeroLatencyFloat.get());
+        else if (processingMode == 1)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedFloat.get());
+        else  // processingMode == 2
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseFloat.get());
+    }
+    else
+    {
+        if (processingMode == 0)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingZeroLatencyDouble.get());
+        else if (processingMode == 1)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedDouble.get());
+        else  // processingMode == 2
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseDouble.get());
+    }
+
+    auto& oversampling = *oversamplingPtr;
 
     // If reference buffer provided, process both through oversampling together for perfect alignment
     if (referenceBuffer != nullptr)
@@ -1846,10 +1992,30 @@ void QuadBlendDriveAudioProcessor::processAdvancedTPL(juce::AudioBuffer<SampleTy
     // Convert ceiling to linear
     const double ceilingLinear = std::pow(10.0, static_cast<double>(ceilingDB) / 20.0);
 
-    // Get appropriate oversampling object
-    auto& oversampling = std::is_same<SampleType, float>::value
-        ? reinterpret_cast<juce::dsp::Oversampling<SampleType>&>(*oversamplingFloat)
-        : reinterpret_cast<juce::dsp::Oversampling<SampleType>&>(*oversamplingDouble);
+    // Get current processing mode and select appropriate oversampling object
+    int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
+    juce::dsp::Oversampling<SampleType>* oversamplingPtr = nullptr;
+
+    if (std::is_same<SampleType, float>::value)
+    {
+        if (processingMode == 0)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingZeroLatencyFloat.get());
+        else if (processingMode == 1)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedFloat.get());
+        else  // processingMode == 2
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseFloat.get());
+    }
+    else
+    {
+        if (processingMode == 0)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingZeroLatencyDouble.get());
+        else if (processingMode == 1)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedDouble.get());
+        else  // processingMode == 2
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseDouble.get());
+    }
+
+    auto& oversampling = *oversamplingPtr;
 
     // Upsample to 8× for true-peak detection
     juce::dsp::AudioBlock<SampleType> block(buffer);
