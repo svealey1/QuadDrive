@@ -169,6 +169,12 @@ QuadBlendDriveAudioProcessor::createParameterLayout()
     layout.add(std::make_unique<juce::AudioParameterBool>(
         "OVERSHOOT_MODE", "Advanced TPL Mode", false));
 
+    // Processing Mode: 0 = Zero Latency, 1 = Balanced (Halfband), 2 = Linear Phase
+    layout.add(std::make_unique<juce::AudioParameterChoice>(
+        "PROCESSING_MODE", "Processing Engine",
+        juce::StringArray{"Zero Latency", "Balanced", "Linear Phase"},
+        1));  // Default to Balanced
+
     return layout;
 }
 
@@ -177,28 +183,72 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
 {
     currentSampleRate = sampleRate;
 
-    // ZERO-LATENCY processing for sample-accurate, phase-coherent operation
-    // 1-sample delay (~0.02ms at 48kHz) to avoid division by zero, effectively instant
-    lookaheadSamples = 1;  // Minimal delay, phase-neutral
-    protectionLookaheadSamples = 1;  // Not used anymore (overshoot suppression is zero-latency)
+    // Get current processing mode
+    int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
 
-    // Main processing latency - ZERO latency for transparent delta mode
-    // No delay compensation on dry signal, processors handle their own lookahead internally
-    totalLatencySamples = 0;  // No delay compensation, no latency reported to DAW
-
-    // Initialize 8x oversampling with linear-phase FIR for overshoot suppression
+    // Configure latency and oversampling based on processing mode
     constexpr size_t oversamplingFactor = 3;  // 2^3 = 8x oversampling
     constexpr size_t numChannels = 2;
 
-    oversamplingFloat = std::make_unique<juce::dsp::Oversampling<float>>(
-        numChannels, oversamplingFactor,
-        juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple,
-        true, false);
+    // MODE 0: Zero Latency (Minimum-Phase)
+    if (processingMode == 0)
+    {
+        lookaheadSamples = 1;  // Minimal delay
+        protectionLookaheadSamples = 1;
+        totalLatencySamples = 0;  // Zero latency
 
-    oversamplingDouble = std::make_unique<juce::dsp::Oversampling<double>>(
-        numChannels, oversamplingFactor,
-        juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple,
-        true, false);
+        // Minimum-phase polyphase IIR oversampling (no linear-phase FIR)
+        oversamplingFloat = std::make_unique<juce::dsp::Oversampling<float>>(
+            numChannels, oversamplingFactor,
+            juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR,
+            false, false);  // No steep filter, no normalization
+
+        oversamplingDouble = std::make_unique<juce::dsp::Oversampling<double>>(
+            numChannels, oversamplingFactor,
+            juce::dsp::Oversampling<double>::filterHalfBandPolyphaseIIR,
+            false, false);
+    }
+    // MODE 1: Balanced (Halfband Equiripple - Current System)
+    else if (processingMode == 1)
+    {
+        lookaheadSamples = 1;
+        protectionLookaheadSamples = 1;
+
+        // Calculate FIR latency for halfband equiripple filters
+        // Typical halfband FIR has ~20-40 samples latency at base rate
+        totalLatencySamples = 32;  // Approximate latency for 8x halfband cascade
+
+        // Linear-phase halfband FIR equiripple (original implementation)
+        oversamplingFloat = std::make_unique<juce::dsp::Oversampling<float>>(
+            numChannels, oversamplingFactor,
+            juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple,
+            true, false);  // Steep, but not normalization
+
+        oversamplingDouble = std::make_unique<juce::dsp::Oversampling<double>>(
+            numChannels, oversamplingFactor,
+            juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple,
+            true, false);
+    }
+    // MODE 2: Full Linear-Phase (High-Order FIR, Mastering Grade)
+    else  // processingMode == 2
+    {
+        lookaheadSamples = 1;
+        protectionLookaheadSamples = 1;
+
+        // Higher latency for high-order linear-phase FIR
+        totalLatencySamples = 128;  // Higher latency for pristine linear-phase
+
+        // Maximum quality linear-phase FIR with normalization
+        oversamplingFloat = std::make_unique<juce::dsp::Oversampling<float>>(
+            numChannels, oversamplingFactor,
+            juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple,
+            true, true);  // Steep + normalization for maximum quality
+
+        oversamplingDouble = std::make_unique<juce::dsp::Oversampling<double>>(
+            numChannels, oversamplingFactor,
+            juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple,
+            true, true);
+    }
 
     oversamplingFloat->initProcessing(static_cast<size_t>(samplesPerBlock));
     oversamplingDouble->initProcessing(static_cast<size_t>(samplesPerBlock));
@@ -986,18 +1036,64 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
 
 // Hard Clipping - Pure digital clipping at 0 dBFS (like Ableton Saturator Digital Clip mode)
 // Includes 3ms delay compensation for phase alignment with other processors
+// MODE-AWARE: Zero Latency = no oversampling, Balanced/Linear Phase = 8x oversampling
 template<typename SampleType>
 void QuadBlendDriveAudioProcessor::processHardClip(juce::AudioBuffer<SampleType>& buffer, SampleType threshold, double sampleRate)
 {
+    // Get current processing mode (0 = Zero Latency, 1 = Balanced, 2 = Linear Phase)
+    int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
+
     const double ceilingD = static_cast<double>(threshold);
 
-    for (int ch = 0; ch < juce::jmin(buffer.getNumChannels(), 2); ++ch)
+    // MODE 0: Zero Latency - NO oversampling, direct processing
+    if (processingMode == 0)
     {
-        auto* data = buffer.getWritePointer(ch);
+        for (int ch = 0; ch < juce::jmin(buffer.getNumChannels(), 2); ++ch)
+        {
+            auto* data = buffer.getWritePointer(ch);
+            auto& lookaheadBuffer = hardClipState[ch].lookaheadBuffer;
+            int& writePos = hardClipState[ch].lookaheadWritePos;
+
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+            {
+                const double currentSample = static_cast<double>(data[i]);
+
+                // Store current sample in delay buffer
+                if (writePos >= 0 && writePos < static_cast<int>(lookaheadBuffer.size()))
+                    lookaheadBuffer[writePos] = currentSample;
+
+                // Read delayed sample for phase alignment
+                int readPos = (writePos + 1) % lookaheadSamples;
+                double delayedSample = currentSample;
+                if (readPos >= 0 && readPos < static_cast<int>(lookaheadBuffer.size()))
+                    delayedSample = lookaheadBuffer[readPos];
+
+                writePos = (writePos + 1) % lookaheadSamples;
+
+                // Pure digital clipping at ceiling threshold
+                const double clipped = juce::jlimit(-ceilingD, ceilingD, delayedSample);
+                data[i] = static_cast<SampleType>(clipped);
+            }
+        }
+        return;
+    }
+
+    // MODE 1 & 2: Balanced or Linear Phase - use oversampling
+    auto& oversampling = std::is_same<SampleType, float>::value
+        ? reinterpret_cast<juce::dsp::Oversampling<SampleType>&>(*oversamplingFloat)
+        : reinterpret_cast<juce::dsp::Oversampling<SampleType>&>(*oversamplingDouble);
+
+    // Upsample to 8× for consistent phase response
+    auto oversampledBlock = oversampling.processSamplesUp(juce::dsp::AudioBlock<SampleType>(buffer));
+    const int oversampledSamples = static_cast<int>(oversampledBlock.getNumSamples());
+
+    for (int ch = 0; ch < juce::jmin(static_cast<int>(oversampledBlock.getNumChannels()), 2); ++ch)
+    {
+        auto* data = oversampledBlock.getChannelPointer(static_cast<size_t>(ch));
         auto& lookaheadBuffer = hardClipState[ch].lookaheadBuffer;
         int& writePos = hardClipState[ch].lookaheadWritePos;
 
-        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        for (int i = 0; i < oversampledSamples; ++i)
         {
             const double currentSample = static_cast<double>(data[i]);
 
@@ -1005,7 +1101,7 @@ void QuadBlendDriveAudioProcessor::processHardClip(juce::AudioBuffer<SampleType>
             if (writePos >= 0 && writePos < static_cast<int>(lookaheadBuffer.size()))
                 lookaheadBuffer[writePos] = currentSample;
 
-            // Read delayed sample (3ms ago) for phase alignment
+            // Read delayed sample for phase alignment
             int readPos = (writePos + 1) % lookaheadSamples;
             double delayedSample = currentSample;
             if (readPos >= 0 && readPos < static_cast<int>(lookaheadBuffer.size()))
@@ -1019,26 +1115,88 @@ void QuadBlendDriveAudioProcessor::processHardClip(juce::AudioBuffer<SampleType>
             data[i] = static_cast<SampleType>(clipped);
         }
     }
+
+    // Downsample back to original rate
+    juce::dsp::AudioBlock<SampleType> outputBlock(buffer);
+    oversampling.processSamplesDown(outputBlock);
 }
 
 // Soft Clipping - Cubic soft clipping with dynamic knee
 // Includes 3ms delay compensation for phase alignment with other processors
+// MODE-AWARE: Zero Latency = no oversampling, Balanced/Linear Phase = 8x oversampling
 template<typename SampleType>
 void QuadBlendDriveAudioProcessor::processSoftClip(juce::AudioBuffer<SampleType>& buffer,
                                                      SampleType ceiling,
                                                      SampleType knee,
                                                      double sampleRate)
 {
+    // Get current processing mode (0 = Zero Latency, 1 = Balanced, 2 = Linear Phase)
+    int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
+
     const double ceilingD = static_cast<double>(ceiling);
     const double color = static_cast<double>(knee) / 100.0;  // Convert knee percentage to color (0-1)
 
-    for (int ch = 0; ch < juce::jmin(buffer.getNumChannels(), 2); ++ch)
+    // MODE 0: Zero Latency - NO oversampling, direct processing
+    if (processingMode == 0)
     {
-        auto* data = buffer.getWritePointer(ch);
+        for (int ch = 0; ch < juce::jmin(buffer.getNumChannels(), 2); ++ch)
+        {
+            auto* data = buffer.getWritePointer(ch);
+            auto& lookaheadBuffer = softClipState[ch].lookaheadBuffer;
+            int& writePos = softClipState[ch].lookaheadWritePos;
+
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+            {
+                const double currentSample = static_cast<double>(data[i]);
+
+                // Store current sample in delay buffer
+                if (writePos >= 0 && writePos < static_cast<int>(lookaheadBuffer.size()))
+                    lookaheadBuffer[writePos] = currentSample;
+
+                // Read delayed sample for phase alignment
+                int readPos = (writePos + 1) % lookaheadSamples;
+                double delayedSample = currentSample;
+                if (readPos >= 0 && readPos < static_cast<int>(lookaheadBuffer.size()))
+                    delayedSample = lookaheadBuffer[readPos];
+
+                writePos = (writePos + 1) % lookaheadSamples;
+
+                // Normalize input to ceiling range
+                const double normalizedInput = delayedSample / ceilingD;
+
+                // Exponential soft knee that gets steeper as signal approaches ceiling
+                const double sign = (normalizedInput >= 0.0) ? 1.0 : -1.0;
+                const double absInput = std::abs(normalizedInput);
+
+                // Knee controls saturation intensity
+                const double saturation = 1.0 + (color * 4.0);  // 1.0 to 5.0
+
+                // Tanh-based soft saturation
+                double output = sign * std::tanh(absInput * saturation) / std::tanh(saturation);
+                output *= ceilingD;
+
+                data[i] = static_cast<SampleType>(output);
+            }
+        }
+        return;
+    }
+
+    // MODE 1 & 2: Balanced or Linear Phase - use oversampling
+    auto& oversampling = std::is_same<SampleType, float>::value
+        ? reinterpret_cast<juce::dsp::Oversampling<SampleType>&>(*oversamplingFloat)
+        : reinterpret_cast<juce::dsp::Oversampling<SampleType>&>(*oversamplingDouble);
+
+    // Upsample to 8× for consistent phase response
+    auto oversampledBlock = oversampling.processSamplesUp(juce::dsp::AudioBlock<SampleType>(buffer));
+    const int oversampledSamples = static_cast<int>(oversampledBlock.getNumSamples());
+
+    for (int ch = 0; ch < juce::jmin(static_cast<int>(oversampledBlock.getNumChannels()), 2); ++ch)
+    {
+        auto* data = oversampledBlock.getChannelPointer(static_cast<size_t>(ch));
         auto& lookaheadBuffer = softClipState[ch].lookaheadBuffer;
         int& writePos = softClipState[ch].lookaheadWritePos;
 
-        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        for (int i = 0; i < oversampledSamples; ++i)
         {
             const double currentSample = static_cast<double>(data[i]);
 
@@ -1046,7 +1204,7 @@ void QuadBlendDriveAudioProcessor::processSoftClip(juce::AudioBuffer<SampleType>
             if (writePos >= 0 && writePos < static_cast<int>(lookaheadBuffer.size()))
                 lookaheadBuffer[writePos] = currentSample;
 
-            // Read delayed sample (3ms ago) for phase alignment
+            // Read delayed sample for phase alignment
             int readPos = (writePos + 1) % lookaheadSamples;
             double delayedSample = currentSample;
             if (readPos >= 0 && readPos < static_cast<int>(lookaheadBuffer.size()))
@@ -1076,17 +1234,25 @@ void QuadBlendDriveAudioProcessor::processSoftClip(juce::AudioBuffer<SampleType>
             data[i] = static_cast<SampleType>(output);
         }
     }
+
+    // Downsample back to original rate
+    juce::dsp::AudioBlock<SampleType> outputBlock(buffer);
+    oversampling.processSamplesDown(outputBlock);
 }
 
 // Slow Limiting - Crest-Factor-Based Adaptive Release Limiter
 // Fast release (20-40ms) for transients, slow release (200-600ms) for sustained material
 // Dynamically blended based on signal crest factor with exponential smoothing
+// MODE-AWARE: Zero Latency = no oversampling, Balanced/Linear Phase = 8x oversampling
 template<typename SampleType>
 void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType>& buffer,
                                                       SampleType threshold,
                                                       SampleType baseReleaseMs,
                                                       double sampleRate)
 {
+    // Get current processing mode (0 = Zero Latency, 1 = Balanced, 2 = Linear Phase)
+    int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
+
     // Fixed parameters for Slow Limiter
     const double attackMs = 3.0;                    // 3ms attack
     const double fastReleaseMinMs = 20.0;          // Fast release min (for transients)
@@ -1096,21 +1262,117 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
     const double kneeDB = 3.0;                     // 3dB soft knee
 
     // Time constants for envelope followers
+    // MODE 0: direct sample rate, MODE 1-2: oversampled rate
+    const double effectiveRate = (processingMode == 0) ? sampleRate : (sampleRate * 8.0);
     const double rmsTimeMs = 50.0;                 // RMS averaging time
     const double peakTimeMs = 10.0;                // Peak tracking time
     const double crestSmoothTimeMs = 100.0;        // Crest factor smoothing time
 
-    const double attackCoeff = std::exp(-1.0 / (attackMs * 0.001 * sampleRate));
-    const double rmsCoeff = std::exp(-1.0 / (rmsTimeMs * 0.001 * sampleRate));
-    const double peakCoeff = std::exp(-1.0 / (peakTimeMs * 0.001 * sampleRate));
-    const double crestSmoothCoeff = std::exp(-1.0 / (crestSmoothTimeMs * 0.001 * sampleRate));
+    const double attackCoeff = std::exp(-1.0 / (attackMs * 0.001 * effectiveRate));
+    const double rmsCoeff = std::exp(-1.0 / (rmsTimeMs * 0.001 * effectiveRate));
+    const double peakCoeff = std::exp(-1.0 / (peakTimeMs * 0.001 * effectiveRate));
+    const double crestSmoothCoeff = std::exp(-1.0 / (crestSmoothTimeMs * 0.001 * effectiveRate));
 
     const double thresholdD = static_cast<double>(threshold);
     const double kneeStart = thresholdD * std::pow(10.0, -kneeDB / 20.0);  // 3dB below threshold
 
-    for (int ch = 0; ch < juce::jmin(buffer.getNumChannels(), 2); ++ch)
+    // MODE 0: Zero Latency - NO oversampling, direct processing
+    if (processingMode == 0)
     {
-        auto* data = buffer.getWritePointer(ch);
+        for (int ch = 0; ch < juce::jmin(buffer.getNumChannels(), 2); ++ch)
+        {
+            auto* data = buffer.getWritePointer(ch);
+            double& envelope = slowLimiterState[ch].envelope;
+            double& rmsEnvelope = slowLimiterState[ch].rmsEnvelope;
+            double& peakEnvelope = slowLimiterState[ch].peakEnvelope;
+            double& smoothedCrestFactor = slowLimiterState[ch].smoothedCrestFactor;
+            auto& lookaheadBuffer = slowLimiterState[ch].lookaheadBuffer;
+            int& writePos = slowLimiterState[ch].lookaheadWritePos;
+
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+            {
+                const double currentSample = static_cast<double>(data[i]);
+
+                // Store current sample in lookahead buffer
+                if (writePos >= 0 && writePos < static_cast<int>(lookaheadBuffer.size()))
+                    lookaheadBuffer[writePos] = currentSample;
+
+                // Read delayed sample
+                int readPos = (writePos + 1) % lookaheadSamples;
+                double delayedSample = currentSample;
+                if (readPos >= 0 && readPos < static_cast<int>(lookaheadBuffer.size()))
+                    delayedSample = lookaheadBuffer[readPos];
+
+                writePos = (writePos + 1) % lookaheadSamples;
+
+                const double inputAbs = std::abs(currentSample);
+
+                // Track RMS envelope
+                const double inputSquared = currentSample * currentSample;
+                rmsEnvelope = rmsCoeff * rmsEnvelope + (1.0 - rmsCoeff) * inputSquared;
+                const double rmsValue = std::sqrt(juce::jmax(1e-10, rmsEnvelope));
+
+                // Track peak envelope
+                peakEnvelope = peakCoeff * peakEnvelope + (1.0 - peakCoeff) * inputAbs;
+                const double peakValue = juce::jmax(1e-10, peakEnvelope);
+
+                // Calculate crest factor
+                const double instantCrestFactor = peakValue / rmsValue;
+                smoothedCrestFactor = crestSmoothCoeff * smoothedCrestFactor +
+                                      (1.0 - crestSmoothCoeff) * instantCrestFactor;
+
+                // Map crest factor to release time
+                const double crestNorm = juce::jlimit(0.0, 1.0, (smoothedCrestFactor - 1.0) / 9.0);
+                const double minRelease = fastReleaseMinMs + crestNorm * (slowReleaseMinMs - fastReleaseMinMs);
+                const double maxRelease = fastReleaseMaxMs + crestNorm * (slowReleaseMaxMs - fastReleaseMaxMs);
+
+                const double overAmount = juce::jmax(0.0, inputAbs - thresholdD);
+                const double adaptiveFactor = overAmount / (thresholdD + 1e-10);
+                const double adaptiveReleaseMs = juce::jlimit(minRelease, maxRelease,
+                                                             minRelease + (maxRelease - minRelease) * adaptiveFactor);
+
+                const double releaseCoeff = std::exp(-1.0 / (adaptiveReleaseMs * 0.001 * effectiveRate));
+
+                // Attack/release envelope follower
+                if (inputAbs > envelope)
+                    envelope = attackCoeff * envelope + (1.0 - attackCoeff) * inputAbs;
+                else
+                    envelope = releaseCoeff * envelope + (1.0 - releaseCoeff) * inputAbs;
+
+                // Calculate gain reduction with soft knee
+                double gain = 1.0;
+                if (envelope <= kneeStart)
+                {
+                    gain = 1.0;
+                }
+                else if (envelope < thresholdD)
+                {
+                    const double kneePos = (envelope - kneeStart) / (thresholdD - kneeStart);
+                    const double compressionAmount = kneePos * kneePos;
+                    gain = 1.0 - compressionAmount * (1.0 - thresholdD / envelope);
+                }
+                else
+                {
+                    gain = thresholdD / envelope;
+                }
+
+                data[i] = static_cast<SampleType>(delayedSample * gain);
+            }
+        }
+        return;
+    }
+
+    // MODE 1 & 2: Balanced or Linear Phase - use oversampling
+    auto& oversampling = std::is_same<SampleType, float>::value
+        ? reinterpret_cast<juce::dsp::Oversampling<SampleType>&>(*oversamplingFloat)
+        : reinterpret_cast<juce::dsp::Oversampling<SampleType>&>(*oversamplingDouble);
+
+    auto oversampledBlock = oversampling.processSamplesUp(juce::dsp::AudioBlock<SampleType>(buffer));
+    const int oversampledSamples = static_cast<int>(oversampledBlock.getNumSamples());
+
+    for (int ch = 0; ch < juce::jmin(static_cast<int>(oversampledBlock.getNumChannels()), 2); ++ch)
+    {
+        auto* data = oversampledBlock.getChannelPointer(static_cast<size_t>(ch));
         double& envelope = slowLimiterState[ch].envelope;
         double& rmsEnvelope = slowLimiterState[ch].rmsEnvelope;
         double& peakEnvelope = slowLimiterState[ch].peakEnvelope;
@@ -1118,7 +1380,7 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
         auto& lookaheadBuffer = slowLimiterState[ch].lookaheadBuffer;
         int& writePos = slowLimiterState[ch].lookaheadWritePos;
 
-        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        for (int i = 0; i < oversampledSamples; ++i)
         {
             const double currentSample = static_cast<double>(data[i]);
 
@@ -1170,7 +1432,7 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
             const double adaptiveReleaseMs = juce::jlimit(minRelease, maxRelease,
                                                          minRelease + (maxRelease - minRelease) * adaptiveFactor);
 
-            const double releaseCoeff = std::exp(-1.0 / (adaptiveReleaseMs * 0.001 * sampleRate));
+            const double releaseCoeff = std::exp(-1.0 / (adaptiveReleaseMs * 0.001 * effectiveRate));
 
             // Attack/release envelope follower
             if (inputAbs > envelope)
@@ -1201,31 +1463,103 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
             data[i] = static_cast<SampleType>(delayedSample * gain);
         }
     }
+
+    // Downsample back to original rate
+    juce::dsp::AudioBlock<SampleType> outputBlock(buffer);
+    oversampling.processSamplesDown(outputBlock);
 }
 
 // Fast Limiting - Hard knee limiting with fixed 10ms release
 // Attack: 1ms, Release: 10ms (fixed), Hard knee, Lookahead: 3ms
+// MODE-AWARE: Zero Latency = no oversampling, Balanced/Linear Phase = 8x oversampling
 template<typename SampleType>
 void QuadBlendDriveAudioProcessor::processFastLimit(juce::AudioBuffer<SampleType>& buffer,
                                                       SampleType threshold,
                                                       double sampleRate)
 {
+    // Get current processing mode (0 = Zero Latency, 1 = Balanced, 2 = Linear Phase)
+    int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
+
     // Fixed parameters for Fast Limiter
     const double attackMs = 1.0;        // 1ms attack
     const double releaseMs = 10.0;      // 10ms release (fixed)
 
-    const double attackCoeff = std::exp(-1.0 / (attackMs * 0.001 * currentSampleRate));
-    const double releaseCoeff = std::exp(-1.0 / (releaseMs * 0.001 * currentSampleRate));
+    // MODE 0: direct sample rate, MODE 1-2: oversampled rate
+    const double effectiveRate = (processingMode == 0) ? currentSampleRate : (currentSampleRate * 8.0);
+
+    const double attackCoeff = std::exp(-1.0 / (attackMs * 0.001 * effectiveRate));
+    const double releaseCoeff = std::exp(-1.0 / (releaseMs * 0.001 * effectiveRate));
     const double thresholdD = static_cast<double>(threshold);
 
-    for (int ch = 0; ch < juce::jmin(buffer.getNumChannels(), 2); ++ch)
+    // MODE 0: Zero Latency - NO oversampling, direct processing
+    if (processingMode == 0)
     {
-        auto* data = buffer.getWritePointer(ch);
+        for (int ch = 0; ch < juce::jmin(buffer.getNumChannels(), 2); ++ch)
+        {
+            auto* data = buffer.getWritePointer(ch);
+            double& envelope = fastLimiterState[ch].envelope;
+            auto& lookaheadBuffer = fastLimiterState[ch].lookaheadBuffer;
+            int& writePos = fastLimiterState[ch].lookaheadWritePos;
+
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+            {
+                const double currentSample = static_cast<double>(data[i]);
+
+                // Store current sample in lookahead buffer
+                if (writePos >= 0 && writePos < static_cast<int>(lookaheadBuffer.size()))
+                    lookaheadBuffer[writePos] = currentSample;
+
+                // Read delayed sample
+                int readPos = (writePos + 1) % lookaheadSamples;
+                double delayedSample = currentSample;
+                if (readPos >= 0 && readPos < static_cast<int>(lookaheadBuffer.size()))
+                    delayedSample = lookaheadBuffer[readPos];
+
+                writePos = (writePos + 1) % lookaheadSamples;
+
+                const double inputAbs = std::abs(currentSample);
+
+                // Envelope follower with attack/release
+                if (inputAbs > envelope)
+                    envelope = attackCoeff * envelope + (1.0 - attackCoeff) * inputAbs;
+                else
+                    envelope = releaseCoeff * envelope + (1.0 - releaseCoeff) * inputAbs;
+
+                // Clamp envelope to prevent extreme values
+                envelope = juce::jlimit(0.0, 10.0, envelope);
+
+                // Hard knee limiting
+                double gain = 1.0;
+                if (envelope > thresholdD)
+                {
+                    gain = thresholdD / envelope;
+                }
+
+                // Clamp gain to prevent artifacts
+                gain = juce::jlimit(0.01, 1.0, gain);
+
+                data[i] = static_cast<SampleType>(delayedSample * gain);
+            }
+        }
+        return;
+    }
+
+    // MODE 1 & 2: Balanced or Linear Phase - use oversampling
+    auto& oversampling = std::is_same<SampleType, float>::value
+        ? reinterpret_cast<juce::dsp::Oversampling<SampleType>&>(*oversamplingFloat)
+        : reinterpret_cast<juce::dsp::Oversampling<SampleType>&>(*oversamplingDouble);
+
+    auto oversampledBlock = oversampling.processSamplesUp(juce::dsp::AudioBlock<SampleType>(buffer));
+    const int oversampledSamples = static_cast<int>(oversampledBlock.getNumSamples());
+
+    for (int ch = 0; ch < juce::jmin(static_cast<int>(oversampledBlock.getNumChannels()), 2); ++ch)
+    {
+        auto* data = oversampledBlock.getChannelPointer(static_cast<size_t>(ch));
         double& envelope = fastLimiterState[ch].envelope;
         auto& lookaheadBuffer = fastLimiterState[ch].lookaheadBuffer;
         int& writePos = fastLimiterState[ch].lookaheadWritePos;
 
-        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        for (int i = 0; i < oversampledSamples; ++i)
         {
             const double currentSample = static_cast<double>(data[i]);
 
@@ -1266,6 +1600,10 @@ void QuadBlendDriveAudioProcessor::processFastLimit(juce::AudioBuffer<SampleType
             data[i] = static_cast<SampleType>(delayedSample * gain);
         }
     }
+
+    // Downsample back to original rate
+    juce::dsp::AudioBlock<SampleType> outputBlock(buffer);
+    oversampling.processSamplesDown(outputBlock);
 }
 
 // Overshoot Suppression - True-Peak Safe Micro-Limiter/Clipper

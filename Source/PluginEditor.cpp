@@ -923,6 +923,30 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     setupPresetButton(presetButtonC, saveButtonC, "C", 2);
     setupPresetButton(presetButtonD, saveButtonD, "D", 3);
 
+    // Setup Processing Mode Selector (Zero Latency, Balanced, Linear Phase)
+    processingModeLabel.setText("ENGINE:", juce::dontSendNotification);
+    processingModeLabel.setJustificationType(juce::Justification::centredRight);
+    processingModeLabel.setFont(juce::Font(11.0f, juce::Font::bold));
+    processingModeLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.85f));
+    addAndMakeVisible(processingModeLabel);
+
+    processingModeCombo.addItem("Zero Latency", 1);
+    processingModeCombo.addItem("Balanced", 2);
+    processingModeCombo.addItem("Linear Phase", 3);
+    processingModeCombo.setColour(juce::ComboBox::backgroundColourId, juce::Colour(35, 35, 40));
+    processingModeCombo.setColour(juce::ComboBox::textColourId, juce::Colours::white.withAlpha(0.9f));
+    processingModeCombo.setColour(juce::ComboBox::outlineColourId, juce::Colour(60, 60, 65));
+    processingModeCombo.setColour(juce::ComboBox::buttonColourId, juce::Colour(50, 50, 55));
+    processingModeCombo.setJustificationType(juce::Justification::centred);
+    addAndMakeVisible(processingModeCombo);
+
+    // Setup Version Label (upper right corner)
+    versionLabel.setText("v1.2.0", juce::dontSendNotification);
+    versionLabel.setJustificationType(juce::Justification::centredRight);
+    versionLabel.setFont(juce::Font(10.0f, juce::Font::plain));
+    versionLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.5f));
+    addAndMakeVisible(versionLabel);
+
     // Create Attachments
     inputGainAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         p.apvts, "INPUT_GAIN", inputGainSlider);
@@ -970,6 +994,8 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
         p.apvts, "OVERSHOOT_BLEND", overshootBlendSlider);
     overshootModeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         p.apvts, "OVERSHOOT_MODE", overshootModeButton);
+    processingModeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        p.apvts, "PROCESSING_MODE", processingModeCombo);
 
     // Make limiter buttons mutually exclusive - only one can be on at a time
     protectionEnableButton.onClick = [this]()
@@ -1043,12 +1069,12 @@ void QuadBlendDriveAudioProcessorEditor::paint(juce::Graphics& g)
     g.drawText("Signal Transfer Enhanced Volume Engine", 0, static_cast<int>(55 * scale), getWidth(),
                static_cast<int>(32 * scale), juce::Justification::centred);
 
-    // Window size display (upper right corner)
+    // Window size display (upper right corner, above version)
     g.setColour(juce::Colour(255, 120, 50).withAlpha(0.8f));
-    g.setFont(juce::Font(14.0f * scale, juce::Font::bold));
+    g.setFont(juce::Font(12.0f * scale, juce::Font::bold));
     juce::String sizeText = juce::String(getWidth()) + " × " + juce::String(getHeight());
-    g.drawText(sizeText, getWidth() - static_cast<int>(150 * scale), static_cast<int>(10 * scale),
-               static_cast<int>(140 * scale), static_cast<int>(20 * scale), juce::Justification::centredRight);
+    g.drawText(sizeText, getWidth() - static_cast<int>(120 * scale), static_cast<int>(5 * scale),
+               static_cast<int>(110 * scale), static_cast<int>(16 * scale), juce::Justification::centredRight);
 }
 
 void QuadBlendDriveAudioProcessorEditor::resized()
@@ -1057,7 +1083,13 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     const float scale = getWidth() / 1120.0f;  // Scale factor based on default width
 
     // Proportional title area (increased for 2x larger title/subtitle)
-    bounds.removeFromTop(static_cast<int>(95 * scale));
+    auto titleArea = bounds.removeFromTop(static_cast<int>(95 * scale));
+
+    // Version label in upper right corner (below window size)
+    versionLabel.setBounds(titleArea.getWidth() - static_cast<int>(80 * scale),
+                          static_cast<int>(22 * scale),
+                          static_cast<int>(70 * scale),
+                          static_cast<int>(16 * scale));
 
     const int padding = static_cast<int>(20 * scale);
     const int knobSize = static_cast<int>(70 * scale);
@@ -1174,6 +1206,24 @@ void QuadBlendDriveAudioProcessorEditor::resized()
 
     // ========== CENTER SECTION (XY PAD) - CENTERED AND SQUARE ==========
     auto centerSection = bounds.removeFromLeft(centerColumnWidth).reduced(padding, 0);
+
+    // Processing Mode Selector above XY Pad
+    auto processingModeRow = centerSection.removeFromTop(static_cast<int>(32 * scale));
+    int processingModeWidth = static_cast<int>(280 * scale);
+    int processingModeLabelWidth = static_cast<int>(60 * scale);
+    int processingModeComboWidth = static_cast<int>(160 * scale);
+    int processingModeXStart = (centerSection.getWidth() - processingModeWidth) / 2;
+
+    processingModeLabel.setBounds(processingModeXStart,
+                                  processingModeRow.getY(),
+                                  processingModeLabelWidth,
+                                  static_cast<int>(28 * scale));
+    processingModeCombo.setBounds(processingModeXStart + processingModeLabelWidth + static_cast<int>(8 * scale),
+                                  processingModeRow.getY(),
+                                  processingModeComboWidth,
+                                  static_cast<int>(28 * scale));
+
+    centerSection.removeFromTop(static_cast<int>(12 * scale));  // Gap below mode selector
 
     // Make XY Pad SQUARE - use the smaller dimension
     int availableHeight = centerSection.getHeight();

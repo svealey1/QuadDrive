@@ -157,6 +157,13 @@ private:
     // Overshoot Mode Toggle (Simple OSM vs Advanced TPL)
     juce::TextButton overshootModeButton;
 
+    // Processing Mode Selector (Zero Latency, Balanced, Linear Phase)
+    juce::ComboBox processingModeCombo;
+    juce::Label processingModeLabel;
+
+    // Version Label (upper right corner)
+    juce::Label versionLabel;
+
     // Toggle Buttons for Muting processors
     juce::ToggleButton hcMuteButton, scMuteButton, slMuteButton, flMuteButton;
 
@@ -192,6 +199,7 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> protectionCeilingAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> overshootBlendAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> overshootModeAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> processingModeAttachment;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(QuadBlendDriveAudioProcessorEditor)
 };

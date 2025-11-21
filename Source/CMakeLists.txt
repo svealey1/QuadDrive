@@ -1,5 +1,6 @@
 juce_add_plugin(QuadBlendDrive
     COMPANY_NAME "Steve Vealey"
+    BUNDLE_ID com.SteveVealey.QuadBlendDrive
     PLUGIN_MANUFACTURER_CODE SvVy
     PLUGIN_CODE Qbdr
     FORMATS VST3 AU
