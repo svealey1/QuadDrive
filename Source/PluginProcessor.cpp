@@ -272,21 +272,9 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
     // Update host with current latency (what DAW sees for track alignment)
     setLatencySamples(totalLatencySamples);
 
-    // Initialize dry delay buffers (for wet/dry mixing phase alignment)
-    // CRITICAL: Size based on INTERNAL compensation, not host-reported latency!
-    for (int ch = 0; ch < 2; ++ch)
-    {
-        if (internalDryCompensationSamples > 0)
-        {
-            dryDelayState[ch].delayBuffer.resize(internalDryCompensationSamples, 0.0);
-            dryDelayState[ch].writePos = 0;
-        }
-        else
-        {
-            dryDelayState[ch].delayBuffer.clear();
-            dryDelayState[ch].writePos = 0;
-        }
-    }
+    // NOTE: Dry delay buffers are NO LONGER NEEDED
+    // Dry signal is now processed through oversampling filters (same as wet)
+    // This ensures identical phase response without needing separate delay compensation
 
     // Initialize mode compensation delay buffers (for mode-switching time alignment)
     // This ensures Balanced and Linear Phase modes have identical latency reporting
@@ -482,9 +470,7 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
     // Reset all processor states and allocate lookahead buffers (3ms for all)
     for (int ch = 0; ch < 2; ++ch)
     {
-        // Dry delay compensation (match wet signal latency for phase-coherent mixing)
-        dryDelayState[ch].delayBuffer.resize(internalDryCompensationSamples, 0.0);
-        dryDelayState[ch].writePos = 0;
+        // NOTE: Dry delay buffers no longer used - dry processed through oversampling instead
 
         // Hard Clip lookahead
         hardClipState[ch].lookaheadBuffer.resize(lookaheadSamples, 0.0);
@@ -737,38 +723,43 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     const SampleType flTrimGain = juce::Decibels::decibelsToGain(flTrimDB);
 
     // Store CLEAN dry signal BEFORE any gain/normalization for transparent wet/dry mixing
-    // Apply delay compensation to match ACTUAL wet signal latency (not host-reported latency!)
-    // CRITICAL: Use internalDryCompensationSamples, not totalLatencySamples
-    // This ensures phase-coherent wet/dry mixing even in Zero Latency mode
-    if (internalDryCompensationSamples > 0)
+    // CRITICAL FIX: Process dry signal through SAME oversampling filters as wet signal
+    // This ensures identical phase response for phase-coherent wet/dry mixing
+    dryBuffer.makeCopyOf(buffer);  // Store clean input
+
+    // Get current processing mode to select correct oversampling filter
+    int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
+
+    // Process dry signal through oversampling to match wet signal phase response
+    // Both dry and wet must experience identical filter phase shifts
+    juce::dsp::Oversampling<SampleType>* oversamplingPtr = nullptr;
+
+    if (std::is_same<SampleType, float>::value)
     {
-        // Process dry signal through delay line for phase coherence
-        dryBuffer.setSize(buffer.getNumChannels(), numSamples, false, false, false);
-
-        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
-        {
-            const auto* input = buffer.getReadPointer(ch);
-            auto* output = dryBuffer.getWritePointer(ch);
-            auto& delayState = dryDelayState[ch];
-
-            for (int i = 0; i < numSamples; ++i)
-            {
-                // Read delayed sample
-                output[i] = static_cast<SampleType>(delayState.delayBuffer[delayState.writePos]);
-
-                // Write new sample to delay line
-                delayState.delayBuffer[delayState.writePos] = static_cast<double>(input[i]);
-
-                // Advance write position (circular buffer)
-                delayState.writePos = (delayState.writePos + 1) % internalDryCompensationSamples;
-            }
-        }
+        if (processingMode == 0)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingZeroLatencyFloat.get());
+        else if (processingMode == 1)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedFloat.get());
+        else  // processingMode == 2
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseFloat.get());
     }
     else
     {
-        // No latency compensation needed
-        dryBuffer.makeCopyOf(buffer);
+        if (processingMode == 0)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingZeroLatencyDouble.get());
+        else if (processingMode == 1)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedDouble.get());
+        else  // processingMode == 2
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseDouble.get());
     }
+
+    // Process dry signal through oversampling (up then down) to apply same filter phase
+    // No actual processing on the oversampled signal - just filter it for phase matching
+    auto& dryOversampling = *oversamplingPtr;
+    auto dryOversampledBlock = dryOversampling.processSamplesUp(juce::dsp::AudioBlock<SampleType>(dryBuffer));
+    // Oversampled signal is not processed - just passes through
+    juce::dsp::AudioBlock<SampleType> dryOutputBlock(dryBuffer);
+    dryOversampling.processSamplesDown(dryOutputBlock);
 
     // === PEAK ANALYSIS (using double precision) ===
     if (analyzingEnabled)
@@ -953,7 +944,7 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
         // === MODE COMPENSATION DELAY ===
         // Apply delay to wet signal in Balanced mode to match Linear Phase latency
         // This ensures switching between Balanced and Linear Phase doesn't shift timeline
-        const int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
+        // Note: processingMode already defined above for dry oversampling
         int modeCompDelay = 0;
 
         if (processingMode == 1)  // Balanced mode

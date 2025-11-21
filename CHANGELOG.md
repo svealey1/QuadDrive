@@ -5,6 +5,29 @@ All notable changes to Quad-Blend Drive will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.3] - 2025-11-21
+
+### Fixed
+- **CRITICAL: Dry signal now processed through oversampling filters**: Fixed persistent comb filtering in all modes
+  - Dry signal now passes through same oversampling filter chain as wet signal (up then down)
+  - Both dry and wet signals experience **identical phase response** from oversampling filters
+  - Eliminates comb filtering when using wet/dry mix knob in **all three processing modes**
+  - No actual processing applied to dry signal - just filtered for phase matching
+
+### Changed
+- **Removed separate dry delay compensation buffers** - no longer needed
+- Dry signal processing architecture:
+  - Store clean input → Oversample up → Pass through (no processing) → Oversample down
+  - Wet signal processing architecture:
+  - Store input → Oversample up → Process (clip/limit/saturate) → Oversample down
+- Both signals now have matching group delay from oversampling filters
+- Works in all modes: Zero Latency (min-phase IIR), Balanced (equiripple FIR), Linear Phase (high-order FIR)
+
+### Technical Details
+- Dry buffer processed through mode-specific oversampling object before mixing
+- Ensures phase-coherent wet/dry blending regardless of processing mode or mix setting
+- Filter phase shift is now identical on both signal paths
+
 ## [1.2.2] - 2025-11-21
 
 ### Fixed
