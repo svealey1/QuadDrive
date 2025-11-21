@@ -723,43 +723,44 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     const SampleType flTrimGain = juce::Decibels::decibelsToGain(flTrimDB);
 
     // Store CLEAN dry signal BEFORE any gain/normalization for transparent wet/dry mixing
-    // CRITICAL FIX: Process dry signal through SAME oversampling filters as wet signal
-    // This ensures identical phase response for phase-coherent wet/dry mixing
+    // CRITICAL: Dry signal must match wet signal's filter processing
     dryBuffer.makeCopyOf(buffer);  // Store clean input
 
-    // Get current processing mode to select correct oversampling filter
+    // Get current processing mode to determine dry signal processing
     int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
 
-    // Process dry signal through oversampling to match wet signal phase response
-    // Both dry and wet must experience identical filter phase shifts
-    juce::dsp::Oversampling<SampleType>* oversamplingPtr = nullptr;
-
-    if (std::is_same<SampleType, float>::value)
+    // MODE 0 (Zero Latency): NO oversampling on dry signal
+    // MODE 1-2 (Balanced/Linear Phase): Oversample dry signal to match wet filter phase
+    if (processingMode == 1 || processingMode == 2)
     {
-        if (processingMode == 0)
-            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingZeroLatencyFloat.get());
-        else if (processingMode == 1)
-            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedFloat.get());
-        else  // processingMode == 2
-            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseFloat.get());
-    }
-    else
-    {
-        if (processingMode == 0)
-            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingZeroLatencyDouble.get());
-        else if (processingMode == 1)
-            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedDouble.get());
-        else  // processingMode == 2
-            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseDouble.get());
-    }
+        // Process dry signal through oversampling to match wet signal phase response
+        // Both dry and wet must experience identical filter phase shifts
+        juce::dsp::Oversampling<SampleType>* oversamplingPtr = nullptr;
 
-    // Process dry signal through oversampling (up then down) to apply same filter phase
-    // No actual processing on the oversampled signal - just filter it for phase matching
-    auto& dryOversampling = *oversamplingPtr;
-    auto dryOversampledBlock = dryOversampling.processSamplesUp(juce::dsp::AudioBlock<SampleType>(dryBuffer));
-    // Oversampled signal is not processed - just passes through
-    juce::dsp::AudioBlock<SampleType> dryOutputBlock(dryBuffer);
-    dryOversampling.processSamplesDown(dryOutputBlock);
+        if (std::is_same<SampleType, float>::value)
+        {
+            if (processingMode == 1)
+                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedFloat.get());
+            else  // processingMode == 2
+                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseFloat.get());
+        }
+        else
+        {
+            if (processingMode == 1)
+                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedDouble.get());
+            else  // processingMode == 2
+                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseDouble.get());
+        }
+
+        // Process dry signal through oversampling (up then down) to apply same filter phase
+        // No actual processing on the oversampled signal - just filter it for phase matching
+        auto& dryOversampling = *oversamplingPtr;
+        auto dryOversampledBlock = dryOversampling.processSamplesUp(juce::dsp::AudioBlock<SampleType>(dryBuffer));
+        // Oversampled signal is not processed - just passes through
+        juce::dsp::AudioBlock<SampleType> dryOutputBlock(dryBuffer);
+        dryOversampling.processSamplesDown(dryOutputBlock);
+    }
+    // else: Zero Latency mode - dry signal stays as-is (no oversampling)
 
     // === PEAK ANALYSIS (using double precision) ===
     if (analyzingEnabled)

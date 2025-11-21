@@ -5,6 +5,22 @@ All notable changes to Quad-Blend Drive will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.4] - 2025-11-21
+
+### Fixed
+- **CRITICAL: Zero Latency mode now has NO oversampling on dry signal**
+  - Dry signal oversampling is now conditional on processing mode
+  - Zero Latency mode (0): Dry signal passes through directly with NO filtering
+  - Balanced mode (1): Dry signal processed through halfband equiripple FIR oversampling
+  - Linear Phase mode (2): Dry signal processed through high-order FIR oversampling
+  - Ensures true zero latency operation in Zero Latency mode
+
+### Changed
+- Dry signal processing is now mode-aware:
+  - Mode 0: `dryBuffer.makeCopyOf(buffer)` - direct copy, no oversampling
+  - Mode 1-2: Dry processed through oversampling filters to match wet phase
+- Zero Latency mode achieves true zero latency on both dry and wet paths
+
 ## [1.2.3] - 2025-11-21
 
 ### Fixed

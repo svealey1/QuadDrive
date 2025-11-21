@@ -941,7 +941,7 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     addAndMakeVisible(processingModeCombo);
 
     // Setup Version Label (upper right corner)
-    versionLabel.setText("v1.2.3", juce::dontSendNotification);
+    versionLabel.setText("v1.2.4", juce::dontSendNotification);
     versionLabel.setJustificationType(juce::Justification::centredRight);
     versionLabel.setFont(juce::Font(10.0f, juce::Font::plain));
     versionLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.5f));
