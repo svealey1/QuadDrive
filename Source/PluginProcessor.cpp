@@ -165,9 +165,11 @@ QuadBlendDriveAudioProcessor::createParameterLayout()
                 return juce::String("Punchy");
         }));
 
-    // Overshoot Module Toggle: false = Simple OSM, true = Advanced TPL
+    // OSM (Overshoot Suppression Module): Dual-Mode Output Processor
+    // Mode 0 (false): Safety Clipper - Preserves transients, slight overshoot allowed
+    // Mode 1 (true):  Advanced TPL - Strict compliance, predictive lookahead with IRC
     layout.add(std::make_unique<juce::AudioParameterBool>(
-        "OVERSHOOT_MODE", "Advanced TPL Mode", false));
+        "OSM_MODE", "OSM Mode (Safe/Clip)", false));
 
     // Processing Mode: 0 = Zero Latency, 1 = Balanced (Halfband), 2 = Linear Phase
     layout.add(std::make_unique<juce::AudioParameterChoice>(
@@ -186,120 +188,34 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
     // Get current processing mode
     int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
 
-    // Configure oversampling: Create ALL three types for latency measurement and compensation
-    constexpr size_t oversamplingFactor = 3;  // 2^3 = 8x oversampling
-    constexpr size_t numChannels = 2;
+    // ===== ARCHITECTURE A: Global Oversampling Manager =====
+    // Prepare oversampling for entire signal chain
+    // Mode 0: No OS (multiplier = 1)
+    // Mode 1: 8× OS (multiplier = 8)
+    // Mode 2: 16× OS (multiplier = 16)
+    osManager.prepare(sampleRate, samplesPerBlock, processingMode);
 
-    // MODE 0: Zero Latency (Minimum-Phase Polyphase IIR)
-    oversamplingZeroLatencyFloat = std::make_unique<juce::dsp::Oversampling<float>>(
-        numChannels, oversamplingFactor,
-        juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR,
-        false, false);  // No steep filter, no normalization (minimum-phase)
+    // Get OS sample rate for all processor calculations
+    const double osSampleRate = osManager.getOsSampleRate();
+    const int osMultiplier = osManager.getOsMultiplier();
 
-    oversamplingZeroLatencyDouble = std::make_unique<juce::dsp::Oversampling<double>>(
-        numChannels, oversamplingFactor,
-        juce::dsp::Oversampling<double>::filterHalfBandPolyphaseIIR,
-        false, false);
+    // Calculate lookahead samples at OS rate
+    // All processors run in OS domain, so lookahead must be at OS rate
+    constexpr double xyProcessorLookaheadMs = 3.0;  // 3ms for XY processors
+    constexpr double tplLookaheadMs = 2.0;          // 2ms for TPL
 
-    // MODE 1: Balanced (Halfband Equiripple FIR)
-    oversamplingBalancedFloat = std::make_unique<juce::dsp::Oversampling<float>>(
-        numChannels, oversamplingFactor,
-        juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple,
-        true, false);  // Steep, no normalization
+    // Lookahead at OS rate (used inside OS domain)
+    lookaheadSamples = static_cast<int>(std::ceil(osSampleRate * xyProcessorLookaheadMs / 1000.0));
+    advancedTPLLookaheadSamples = static_cast<int>(std::ceil(osSampleRate * tplLookaheadMs / 1000.0));
 
-    oversamplingBalancedDouble = std::make_unique<juce::dsp::Oversampling<double>>(
-        numChannels, oversamplingFactor,
-        juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple,
-        true, false);
+    // Calculate plugin latency reported to host
+    // Latency = OS filter latency + TPL lookahead (converted back to base rate)
+    const int osFilterLatency = osManager.getLatencySamples();  // At base rate
+    const int tplLookaheadBaseSamples = static_cast<int>(std::ceil(sampleRate * tplLookaheadMs / 1000.0));
+    totalLatencySamples = osFilterLatency + tplLookaheadBaseSamples;
 
-    // MODE 2: Linear Phase (High-Order FIR with normalization for perfect reconstruction)
-    oversamplingLinearPhaseFloat = std::make_unique<juce::dsp::Oversampling<float>>(
-        numChannels, oversamplingFactor,
-        juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple,
-        true, true);  // Steep + normalization for maximum quality
-
-    oversamplingLinearPhaseDouble = std::make_unique<juce::dsp::Oversampling<double>>(
-        numChannels, oversamplingFactor,
-        juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple,
-        true, true);
-
-    // Initialize all oversampling objects
-    oversamplingZeroLatencyFloat->initProcessing(static_cast<size_t>(samplesPerBlock));
-    oversamplingZeroLatencyDouble->initProcessing(static_cast<size_t>(samplesPerBlock));
-    oversamplingBalancedFloat->initProcessing(static_cast<size_t>(samplesPerBlock));
-    oversamplingBalancedDouble->initProcessing(static_cast<size_t>(samplesPerBlock));
-    oversamplingLinearPhaseFloat->initProcessing(static_cast<size_t>(samplesPerBlock));
-    oversamplingLinearPhaseDouble->initProcessing(static_cast<size_t>(samplesPerBlock));
-
-    // Measure actual latencies (use float versions for measurement)
-    zeroLatencyModeSamples = static_cast<int>(oversamplingZeroLatencyFloat->getLatencyInSamples());
-    balancedModeLatencySamples = static_cast<int>(oversamplingBalancedFloat->getLatencyInSamples());
-    linearPhaseModeLatencySamples = static_cast<int>(oversamplingLinearPhaseFloat->getLatencyInSamples());
-
-    // Calculate maximum latency (Linear Phase should be the highest)
-    maxModeLatencySamples = juce::jmax(balancedModeLatencySamples, linearPhaseModeLatencySamples);
-
-    // Calculate compensation delays for each mode to match maxModeLatencySamples
-    // Zero Latency: reports 0 to host, no compensation needed (true zero latency)
-    // Balanced: add delay to match Linear Phase
-    // Linear Phase: no compensation needed (it's the max)
-    zeroLatencyCompensationSamples = 0;  // Zero Latency mode reports 0, no compensation
-    balancedCompensationSamples = maxModeLatencySamples - balancedModeLatencySamples;
-    linearPhaseCompensationSamples = 0;  // Linear Phase is already the max
-
-    // Set lookahead samples (used for XY processors)
-    lookaheadSamples = 1;  // Minimal lookahead for all modes
-    protectionLookaheadSamples = 1;
-
-    // Set total plugin latency REPORTED to host based on current mode
-    // MODE 0 (Zero Latency): Report 0 latency to host (residual min-phase latency is acceptable)
-    // MODE 1 (Balanced): Report maxModeLatencySamples to host (with compensation)
-    // MODE 2 (Linear Phase): Report maxModeLatencySamples to host
-    if (processingMode == 0)
-        totalLatencySamples = 0;  // Zero Latency mode reports 0
-    else
-        totalLatencySamples = maxModeLatencySamples;  // Balanced and Linear Phase report max
-
-    // Set INTERNAL dry signal compensation based on ACTUAL wet path latency
-    // This is what we actually delay the dry signal by to match wet signal phase
-    // MODE 0: Delay dry by actual measured ZL latency (even though we report 0 to host)
-    // MODE 1 & 2: Delay dry by maxModeLatencySamples (matches total wet latency after compensation)
-    if (processingMode == 0)
-        internalDryCompensationSamples = zeroLatencyModeSamples;  // Actual ZL latency for wet/dry phase alignment
-    else
-        internalDryCompensationSamples = maxModeLatencySamples;  // Max latency for Balanced/Linear Phase
-
-    // Update host with current latency (what DAW sees for track alignment)
+    // Report latency to host
     setLatencySamples(totalLatencySamples);
-
-    // NOTE: Dry delay buffers are NO LONGER NEEDED
-    // Dry signal is now processed through oversampling filters (same as wet)
-    // This ensures identical phase response without needing separate delay compensation
-
-    // Initialize mode compensation delay buffers (for mode-switching time alignment)
-    // This ensures Balanced and Linear Phase modes have identical latency reporting
-    int modeCompensationDelay = 0;
-    if (processingMode == 1)  // Balanced mode
-        modeCompensationDelay = balancedCompensationSamples;
-    // Linear Phase and Zero Latency modes don't need compensation
-
-    for (int ch = 0; ch < 2; ++ch)
-    {
-        if (modeCompensationDelay > 0)
-        {
-            modeCompensationState[ch].delayBuffer.resize(modeCompensationDelay, 0.0);
-            modeCompensationState[ch].writePos = 0;
-        }
-        else
-        {
-            modeCompensationState[ch].delayBuffer.clear();
-            modeCompensationState[ch].writePos = 0;
-        }
-    }
-
-    // Initialize Advanced True Peak Limiter (TPL) state
-    constexpr double lookaheadMs = 2.0;  // 2ms lookahead (1-3ms range)
-    advancedTPLLookaheadSamples = static_cast<int>(std::ceil(sampleRate * lookaheadMs / 1000.0));
 
     for (int ch = 0; ch < 2; ++ch)
     {
@@ -314,9 +230,13 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
         state.highBandEnv = 0.0;
         state.currentReleaseCoeff = 0.001;  // Default release
 
-        // Design multiband filters for IRC
+        // Initialize OSM Mode 0 compensation delay buffer (matches Mode 1 lookahead)
+        osmCompensationState[ch].delayBuffer.resize(advancedTPLLookaheadSamples, 0.0);
+        osmCompensationState[ch].writePos = 0;
+
+        // Design multiband filters for IRC at OS rate
         const double pi = juce::MathConstants<double>::pi;
-        const double fs = sampleRate * 8.0;  // 8× oversampled rate
+        const double fs = osSampleRate;  // Oversampled rate (1×, 8×, or 16×)
 
         // Low-pass filter: <200 Hz (2nd order Butterworth)
         {
@@ -470,7 +390,12 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
     // Reset all processor states and allocate lookahead buffers (3ms for all)
     for (int ch = 0; ch < 2; ++ch)
     {
-        // NOTE: Dry delay buffers no longer used - dry processed through oversampling instead
+        // v1.5.0: Dry delay buffers sized for maximum latency (Linear Phase mode)
+        // Actual delay amount is set per-mode in processBlock
+        // Buffer must be large enough to handle any mode
+        const int maxDryDelay = linearPhaseModeLatencySamples + lookaheadSamples;
+        dryDelayState[ch].delayBuffer.resize(maxDryDelay, 0.0);
+        dryDelayState[ch].writePos = 0;
 
         // Hard Clip lookahead
         hardClipState[ch].lookaheadBuffer.resize(lookaheadSamples, 0.0);
@@ -722,45 +647,8 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     const SampleType slTrimGain = juce::Decibels::decibelsToGain(slTrimDB);
     const SampleType flTrimGain = juce::Decibels::decibelsToGain(flTrimDB);
 
-    // Store CLEAN dry signal BEFORE any gain/normalization for transparent wet/dry mixing
-    // CRITICAL: Dry signal must match wet signal's filter processing
-    dryBuffer.makeCopyOf(buffer);  // Store clean input
-
-    // Get current processing mode to determine dry signal processing
+    // Get current processing mode (needed for dry signal processing)
     int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
-
-    // MODE 0 (Zero Latency): NO oversampling on dry signal
-    // MODE 1-2 (Balanced/Linear Phase): Oversample dry signal to match wet filter phase
-    if (processingMode == 1 || processingMode == 2)
-    {
-        // Process dry signal through oversampling to match wet signal phase response
-        // Both dry and wet must experience identical filter phase shifts
-        juce::dsp::Oversampling<SampleType>* oversamplingPtr = nullptr;
-
-        if (std::is_same<SampleType, float>::value)
-        {
-            if (processingMode == 1)
-                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedFloat.get());
-            else  // processingMode == 2
-                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseFloat.get());
-        }
-        else
-        {
-            if (processingMode == 1)
-                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedDouble.get());
-            else  // processingMode == 2
-                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseDouble.get());
-        }
-
-        // Process dry signal through oversampling (up then down) to apply same filter phase
-        // No actual processing on the oversampled signal - just filter it for phase matching
-        auto& dryOversampling = *oversamplingPtr;
-        auto dryOversampledBlock = dryOversampling.processSamplesUp(juce::dsp::AudioBlock<SampleType>(dryBuffer));
-        // Oversampled signal is not processed - just passes through
-        juce::dsp::AudioBlock<SampleType> dryOutputBlock(dryBuffer);
-        dryOversampling.processSamplesDown(dryOutputBlock);
-    }
-    // else: Zero Latency mode - dry signal stays as-is (no oversampling)
 
     // === PEAK ANALYSIS (using double precision) ===
     if (analyzingEnabled)
@@ -791,6 +679,12 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     // Store input after gain for GR calculation
     const SampleType totalInputGain = normGain * inputGain;
 
+    // === STORE DRY SIGNAL (after normalization and input gain) ===
+    // CRITICAL: Dry signal must have same level as wet for time-aligned mixing
+    // NOTE: Dry is NOT processed through oversampling (would create timing mismatch)
+    // Instead, dry will be delayed by simple delay buffer to match total wet path latency
+    dryBuffer.makeCopyOf(buffer);
+
     // Calculate bi-linear blend weights from XY pad
     // XY Grid Layout: Top-Left=SL, Top-Right=HC, Bottom-Left=SC, Bottom-Right=FL
     // GUI sends: Y=1 for TOP, Y=0 for BOTTOM; X=0 for LEFT, X=1 for RIGHT
@@ -807,7 +701,9 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
 
     // Renormalize weights to sum to 1.0 (avoid division by zero)
     const SampleType weightSum = wHC + wSC + wSL + wFL;
-    if (weightSum > static_cast<SampleType>(1e-10))
+    const bool allProcessorsMuted = (weightSum <= static_cast<SampleType>(1e-10));
+
+    if (!allProcessorsMuted)
     {
         const SampleType normFactor = static_cast<SampleType>(1.0) / weightSum;
         wHC *= normFactor;
@@ -817,70 +713,76 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     }
     else
     {
-        // All processors muted - output silence
+        // All processors muted - weights stay zero (will skip processing and use dry signal)
         wHC = wSC = wSL = wFL = static_cast<SampleType>(0.0);
     }
 
-    // Copy input to temp buffers for parallel processing
-    tempBuffer1.makeCopyOf(buffer);
-    tempBuffer2.makeCopyOf(buffer);
-    tempBuffer3.makeCopyOf(buffer);
-    tempBuffer4.makeCopyOf(buffer);
-
-    // Process Path 1: Hard Clipping
-    tempBuffer1.applyGain(hcTrimGain);
-    processHardClip(tempBuffer1, threshold, currentSampleRate);
-
-    // Process Path 2: Soft Clipping
-    tempBuffer2.applyGain(scTrimGain);
-    processSoftClip(tempBuffer2, threshold, scKnee, currentSampleRate);
-
-    // Process Path 3: Slow Limiting (Adaptive Auto-Release)
-    tempBuffer3.applyGain(slTrimGain);
-    processSlowLimit(tempBuffer3, threshold, limitRelMs, currentSampleRate);
-
-    // Process Path 4: Fast Limiting (Hard Knee Fast)
-    tempBuffer4.applyGain(flTrimGain);
-    processFastLimit(tempBuffer4, threshold, currentSampleRate);
-
-    // === GAIN COMPENSATION ===
-    // If master compensation is enabled, apply inverse trim gains to compensate for level differences
-    const bool masterCompEnabled = apvts.getRawParameterValue("MASTER_COMP")->load() > 0.5f;
-    if (masterCompEnabled)
+    // === PROCESSING OPTIMIZATION ===
+    // If all processors are muted, skip processing entirely (pristine passthrough of gained input)
+    if (!allProcessorsMuted)
     {
-        const bool hcCompEnabled = apvts.getRawParameterValue("HC_COMP")->load() > 0.5f;
-        const bool scCompEnabled = apvts.getRawParameterValue("SC_COMP")->load() > 0.5f;
-        const bool slCompEnabled = apvts.getRawParameterValue("SL_COMP")->load() > 0.5f;
-        const bool flCompEnabled = apvts.getRawParameterValue("FL_COMP")->load() > 0.5f;
+        // Copy input to temp buffers for parallel processing
+        tempBuffer1.makeCopyOf(buffer);
+        tempBuffer2.makeCopyOf(buffer);
+        tempBuffer3.makeCopyOf(buffer);
+        tempBuffer4.makeCopyOf(buffer);
 
-        // Apply inverse trim gains (compensation)
-        if (hcCompEnabled && std::abs(hcTrimGain - static_cast<SampleType>(1.0)) > static_cast<SampleType>(1e-6))
-            tempBuffer1.applyGain(static_cast<SampleType>(1.0) / hcTrimGain);
+        // Process Path 1: Hard Clipping
+        tempBuffer1.applyGain(hcTrimGain);
+        processHardClip(tempBuffer1, threshold, currentSampleRate);
 
-        if (scCompEnabled && std::abs(scTrimGain - static_cast<SampleType>(1.0)) > static_cast<SampleType>(1e-6))
-            tempBuffer2.applyGain(static_cast<SampleType>(1.0) / scTrimGain);
+        // Process Path 2: Soft Clipping
+        tempBuffer2.applyGain(scTrimGain);
+        processSoftClip(tempBuffer2, threshold, scKnee, currentSampleRate);
 
-        if (slCompEnabled && std::abs(slTrimGain - static_cast<SampleType>(1.0)) > static_cast<SampleType>(1e-6))
-            tempBuffer3.applyGain(static_cast<SampleType>(1.0) / slTrimGain);
+        // Process Path 3: Slow Limiting (Adaptive Auto-Release)
+        tempBuffer3.applyGain(slTrimGain);
+        processSlowLimit(tempBuffer3, threshold, limitRelMs, currentSampleRate);
 
-        if (flCompEnabled && std::abs(flTrimGain - static_cast<SampleType>(1.0)) > static_cast<SampleType>(1e-6))
-            tempBuffer4.applyGain(static_cast<SampleType>(1.0) / flTrimGain);
-    }
+        // Process Path 4: Fast Limiting (Hard Knee Fast)
+        tempBuffer4.applyGain(flTrimGain);
+        processFastLimit(tempBuffer4, threshold, currentSampleRate);
 
-    // Blend the four paths using bi-linear interpolation
-    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
-    {
-        auto* dest = buffer.getWritePointer(ch);
-        const auto* src1 = tempBuffer1.getReadPointer(ch);
-        const auto* src2 = tempBuffer2.getReadPointer(ch);
-        const auto* src3 = tempBuffer3.getReadPointer(ch);
-        const auto* src4 = tempBuffer4.getReadPointer(ch);
-
-        for (int i = 0; i < numSamples; ++i)
+        // === GAIN COMPENSATION ===
+        // If master compensation is enabled, apply inverse trim gains to compensate for level differences
+        const bool masterCompEnabled = apvts.getRawParameterValue("MASTER_COMP")->load() > 0.5f;
+        if (masterCompEnabled)
         {
-            dest[i] = wHC * src1[i] + wSC * src2[i] + wSL * src3[i] + wFL * src4[i];
+            const bool hcCompEnabled = apvts.getRawParameterValue("HC_COMP")->load() > 0.5f;
+            const bool scCompEnabled = apvts.getRawParameterValue("SC_COMP")->load() > 0.5f;
+            const bool slCompEnabled = apvts.getRawParameterValue("SL_COMP")->load() > 0.5f;
+            const bool flCompEnabled = apvts.getRawParameterValue("FL_COMP")->load() > 0.5f;
+
+            // Apply inverse trim gains (compensation)
+            if (hcCompEnabled && std::abs(hcTrimGain - static_cast<SampleType>(1.0)) > static_cast<SampleType>(1e-6))
+                tempBuffer1.applyGain(static_cast<SampleType>(1.0) / hcTrimGain);
+
+            if (scCompEnabled && std::abs(scTrimGain - static_cast<SampleType>(1.0)) > static_cast<SampleType>(1e-6))
+                tempBuffer2.applyGain(static_cast<SampleType>(1.0) / scTrimGain);
+
+            if (slCompEnabled && std::abs(slTrimGain - static_cast<SampleType>(1.0)) > static_cast<SampleType>(1e-6))
+                tempBuffer3.applyGain(static_cast<SampleType>(1.0) / slTrimGain);
+
+            if (flCompEnabled && std::abs(flTrimGain - static_cast<SampleType>(1.0)) > static_cast<SampleType>(1e-6))
+                tempBuffer4.applyGain(static_cast<SampleType>(1.0) / flTrimGain);
+        }
+
+        // Blend the four paths using bi-linear interpolation
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+        {
+            auto* dest = buffer.getWritePointer(ch);
+            const auto* src1 = tempBuffer1.getReadPointer(ch);
+            const auto* src2 = tempBuffer2.getReadPointer(ch);
+            const auto* src3 = tempBuffer3.getReadPointer(ch);
+            const auto* src4 = tempBuffer4.getReadPointer(ch);
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                dest[i] = wHC * src1[i] + wSC * src2[i] + wSL * src3[i] + wFL * src4[i];
+            }
         }
     }
+    // else: All processors muted - buffer contains gained input signal (pristine passthrough)
 
     // === PHASE DIFFERENCE LIMITER (DISABLED - Too audible) ===
     // Phase limiting on wet/dry deviation fundamentally changes nonlinear character
@@ -942,37 +844,47 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     }
     else
     {
-        // === MODE COMPENSATION DELAY ===
-        // Apply delay to wet signal in Balanced mode to match Linear Phase latency
-        // This ensures switching between Balanced and Linear Phase doesn't shift timeline
-        // Note: processingMode already defined above for dry oversampling
-        int modeCompDelay = 0;
+        // === DRY SIGNAL DELAY COMPENSATION (PER MODE) ===
+        // v1.5.0: Dry signal delayed to match wet path latency (per-mode)
+        // This ensures time-aligned wet/dry mixing
+        // Mode 0: 0 delay (zero latency)
+        // Mode 1: balancedModeLatencySamples + lookaheadSamples
+        // Mode 2: linearPhaseModeLatencySamples + lookaheadSamples
+        int dryDelayAmount = 0;
+        if (processingMode == 0)
+        {
+            dryDelayAmount = 0;  // Zero Latency mode: no delay
+        }
+        else if (processingMode == 1)
+        {
+            dryDelayAmount = balancedModeLatencySamples + lookaheadSamples;
+        }
+        else  // processingMode == 2
+        {
+            dryDelayAmount = linearPhaseModeLatencySamples + lookaheadSamples;
+        }
 
-        if (processingMode == 1)  // Balanced mode
-            modeCompDelay = balancedCompensationSamples;
-        // Linear Phase and Zero Latency modes don't need compensation
-
-        if (modeCompDelay > 0)
+        if (dryDelayAmount > 0)
         {
             for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
             {
-                auto* data = buffer.getWritePointer(ch);
-                auto& compState = modeCompensationState[ch];
-                auto& delayBuf = compState.delayBuffer;
-                int& writePos = compState.writePos;
+                auto* dryData = dryBuffer.getWritePointer(ch);
+                auto& dryState = dryDelayState[ch];
+                auto& delayBuf = dryState.delayBuffer;
+                int& writePos = dryState.writePos;
 
                 for (int i = 0; i < numSamples; ++i)
                 {
-                    // Store current sample
+                    // Store current dry sample
                     if (writePos >= 0 && writePos < static_cast<int>(delayBuf.size()))
-                        delayBuf[writePos] = static_cast<double>(data[i]);
+                        delayBuf[writePos] = static_cast<double>(dryData[i]);
 
-                    // Read delayed sample
-                    int readPos = (writePos + 1) % modeCompDelay;
+                    // Read delayed dry sample (matches total wet signal latency)
+                    int readPos = (writePos + 1) % dryDelayAmount;
                     if (readPos >= 0 && readPos < static_cast<int>(delayBuf.size()))
-                        data[i] = static_cast<SampleType>(delayBuf[readPos]);
+                        dryData[i] = static_cast<SampleType>(delayBuf[readPos]);
 
-                    writePos = (writePos + 1) % modeCompDelay;
+                    writePos = (writePos + 1) % dryDelayAmount;
                 }
             }
         }
@@ -1002,7 +914,7 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     // 2. True Peak: Advanced TPL with IRC (Intelligent Release Control) - monitored by TP Delta
     // NOTE: Only ONE should be enabled at a time to avoid double-oversampling phase issues
     const bool noOvershootEnabled = apvts.getRawParameterValue("PROTECTION_ENABLE")->load() > 0.5f;
-    const bool truePeakEnabled = apvts.getRawParameterValue("OVERSHOOT_MODE")->load() > 0.5f;
+    const bool osmModeAdvancedTPL = apvts.getRawParameterValue("OSM_MODE")->load() > 0.5f;  // true = Mode 1 (Advanced TPL), false = Mode 0 (Safety Clipper)
     const SampleType ceilingDB = static_cast<SampleType>(apvts.getRawParameterValue("PROTECTION_CEILING")->load());
     const bool overshootDeltaMode = apvts.getRawParameterValue("OVERSHOOT_DELTA_MODE")->load() > 0.5f;
     const bool truePeakDeltaMode = apvts.getRawParameterValue("TRUE_PEAK_DELTA_MODE")->load() > 0.5f;
@@ -1030,11 +942,16 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
         // === Normal processing (no delta for True Peak - too complex with lookahead) ===
         else
         {
-            // Run ONE limiter (if both enabled, True Peak takes priority)
-            if (truePeakEnabled)
-                processAdvancedTPL(buffer, ceilingDB, currentSampleRate, static_cast<juce::AudioBuffer<SampleType>*>(nullptr));
-            else if (noOvershootEnabled)
-                processOvershootSuppression(buffer, ceilingDB, currentSampleRate, true, static_cast<juce::AudioBuffer<SampleType>*>(nullptr));
+            // Run ONE limiter based on OSM_MODE (if protection enabled)
+            if (noOvershootEnabled)
+            {
+                if (osmModeAdvancedTPL)
+                    // Mode 1: Advanced TPL with IRC and predictive lookahead
+                    processAdvancedTPL(buffer, ceilingDB, currentSampleRate, static_cast<juce::AudioBuffer<SampleType>*>(nullptr));
+                else
+                    // Mode 0: Safety Clipper with constant-latency compensation
+                    processOvershootSuppression(buffer, ceilingDB, currentSampleRate, true, static_cast<juce::AudioBuffer<SampleType>*>(nullptr));
+            }
         }
     }
 
@@ -1109,162 +1026,31 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
 //==============================================================================
 // Template DSP Processing Functions
 
-// Hard Clipping - Pure digital clipping at 0 dBFS (like Ableton Saturator Digital Clip mode)
-// Includes 3ms delay compensation for phase alignment with other processors
-// MODE-AWARE: Zero Latency = no oversampling, Balanced/Linear Phase = 8x oversampling
+// Hard Clipping - Pure digital clipping at threshold (like Ableton Saturator Digital Clip mode)
+// v1.5.0 Pristine Essentials: Simple jlimit clipping, oversampling is the ONLY anti-aliasing
+// MODE 0: Direct processing (no oversampling, no lookahead)
+// MODE 1: 8× oversampling + 3ms lookahead
+// MODE 2: 16× oversampling + 3ms lookahead
 template<typename SampleType>
 void QuadBlendDriveAudioProcessor::processHardClip(juce::AudioBuffer<SampleType>& buffer, SampleType threshold, double sampleRate)
 {
     // Get current processing mode (0 = Zero Latency, 1 = Balanced, 2 = Linear Phase)
     int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
 
-    const double ceilingD = static_cast<double>(threshold);
+    const double thresholdD = static_cast<double>(threshold);
 
-    // MODE 0: Zero Latency - NO oversampling, direct processing
+    // MODE 0: Zero Latency - Direct hard clip, NO oversampling, NO lookahead
+    // Accept minimal aliasing as tradeoff for true zero latency
     if (processingMode == 0)
     {
         for (int ch = 0; ch < juce::jmin(buffer.getNumChannels(), 2); ++ch)
         {
             auto* data = buffer.getWritePointer(ch);
-            auto& lookaheadBuffer = hardClipState[ch].lookaheadBuffer;
-            int& writePos = hardClipState[ch].lookaheadWritePos;
 
             for (int i = 0; i < buffer.getNumSamples(); ++i)
             {
-                const double currentSample = static_cast<double>(data[i]);
-
-                // Store current sample in delay buffer
-                if (writePos >= 0 && writePos < static_cast<int>(lookaheadBuffer.size()))
-                    lookaheadBuffer[writePos] = currentSample;
-
-                // Read delayed sample for phase alignment
-                int readPos = (writePos + 1) % lookaheadSamples;
-                double delayedSample = currentSample;
-                if (readPos >= 0 && readPos < static_cast<int>(lookaheadBuffer.size()))
-                    delayedSample = lookaheadBuffer[readPos];
-
-                writePos = (writePos + 1) % lookaheadSamples;
-
-                // Pure digital clipping at ceiling threshold
-                const double clipped = juce::jlimit(-ceilingD, ceilingD, delayedSample);
-                data[i] = static_cast<SampleType>(clipped);
-            }
-        }
-        return;
-    }
-
-    // MODE 1 & 2: Balanced or Linear Phase - use mode-specific oversampling
-    juce::dsp::Oversampling<SampleType>* oversamplingPtr = nullptr;
-
-    if (std::is_same<SampleType, float>::value)
-    {
-        if (processingMode == 1)
-            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedFloat.get());
-        else  // processingMode == 2
-            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseFloat.get());
-    }
-    else
-    {
-        if (processingMode == 1)
-            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedDouble.get());
-        else  // processingMode == 2
-            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseDouble.get());
-    }
-
-    auto& oversampling = *oversamplingPtr;
-
-    // Upsample to 8× for consistent phase response
-    auto oversampledBlock = oversampling.processSamplesUp(juce::dsp::AudioBlock<SampleType>(buffer));
-    const int oversampledSamples = static_cast<int>(oversampledBlock.getNumSamples());
-
-    for (int ch = 0; ch < juce::jmin(static_cast<int>(oversampledBlock.getNumChannels()), 2); ++ch)
-    {
-        auto* data = oversampledBlock.getChannelPointer(static_cast<size_t>(ch));
-        auto& lookaheadBuffer = hardClipState[ch].lookaheadBuffer;
-        int& writePos = hardClipState[ch].lookaheadWritePos;
-
-        for (int i = 0; i < oversampledSamples; ++i)
-        {
-            const double currentSample = static_cast<double>(data[i]);
-
-            // Store current sample in delay buffer
-            if (writePos >= 0 && writePos < static_cast<int>(lookaheadBuffer.size()))
-                lookaheadBuffer[writePos] = currentSample;
-
-            // Read delayed sample for phase alignment
-            int readPos = (writePos + 1) % lookaheadSamples;
-            double delayedSample = currentSample;
-            if (readPos >= 0 && readPos < static_cast<int>(lookaheadBuffer.size()))
-                delayedSample = lookaheadBuffer[readPos];
-
-            writePos = (writePos + 1) % lookaheadSamples;
-
-            // Pure digital clipping at ceiling threshold
-            const double clipped = juce::jlimit(-ceilingD, ceilingD, delayedSample);
-
-            data[i] = static_cast<SampleType>(clipped);
-        }
-    }
-
-    // Downsample back to original rate
-    juce::dsp::AudioBlock<SampleType> outputBlock(buffer);
-    oversampling.processSamplesDown(outputBlock);
-}
-
-// Soft Clipping - Cubic soft clipping with dynamic knee
-// Includes 3ms delay compensation for phase alignment with other processors
-// MODE-AWARE: Zero Latency = no oversampling, Balanced/Linear Phase = 8x oversampling
-template<typename SampleType>
-void QuadBlendDriveAudioProcessor::processSoftClip(juce::AudioBuffer<SampleType>& buffer,
-                                                     SampleType ceiling,
-                                                     SampleType knee,
-                                                     double sampleRate)
-{
-    // Get current processing mode (0 = Zero Latency, 1 = Balanced, 2 = Linear Phase)
-    int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
-
-    const double ceilingD = static_cast<double>(ceiling);
-    const double color = static_cast<double>(knee) / 100.0;  // Convert knee percentage to color (0-1)
-
-    // MODE 0: Zero Latency - NO oversampling, direct processing
-    if (processingMode == 0)
-    {
-        for (int ch = 0; ch < juce::jmin(buffer.getNumChannels(), 2); ++ch)
-        {
-            auto* data = buffer.getWritePointer(ch);
-            auto& lookaheadBuffer = softClipState[ch].lookaheadBuffer;
-            int& writePos = softClipState[ch].lookaheadWritePos;
-
-            for (int i = 0; i < buffer.getNumSamples(); ++i)
-            {
-                const double currentSample = static_cast<double>(data[i]);
-
-                // Store current sample in delay buffer
-                if (writePos >= 0 && writePos < static_cast<int>(lookaheadBuffer.size()))
-                    lookaheadBuffer[writePos] = currentSample;
-
-                // Read delayed sample for phase alignment
-                int readPos = (writePos + 1) % lookaheadSamples;
-                double delayedSample = currentSample;
-                if (readPos >= 0 && readPos < static_cast<int>(lookaheadBuffer.size()))
-                    delayedSample = lookaheadBuffer[readPos];
-
-                writePos = (writePos + 1) % lookaheadSamples;
-
-                // Normalize input to ceiling range
-                const double normalizedInput = delayedSample / ceilingD;
-
-                // Exponential soft knee that gets steeper as signal approaches ceiling
-                const double sign = (normalizedInput >= 0.0) ? 1.0 : -1.0;
-                const double absInput = std::abs(normalizedInput);
-
-                // Knee controls saturation intensity
-                const double saturation = 1.0 + (color * 4.0);  // 1.0 to 5.0
-
-                // Tanh-based soft saturation
-                double output = sign * std::tanh(absInput * saturation) / std::tanh(saturation);
-                output *= ceilingD;
-
+                const double x = static_cast<double>(data[i]);
+                const double output = juce::jlimit(-thresholdD, thresholdD, x);
                 data[i] = static_cast<SampleType>(output);
             }
         }
@@ -1291,15 +1077,18 @@ void QuadBlendDriveAudioProcessor::processSoftClip(juce::AudioBuffer<SampleType>
 
     auto& oversampling = *oversamplingPtr;
 
-    // Upsample to 8× for consistent phase response
+    // Upsample (8× or 16× depending on mode)
     auto oversampledBlock = oversampling.processSamplesUp(juce::dsp::AudioBlock<SampleType>(buffer));
     const int oversampledSamples = static_cast<int>(oversampledBlock.getNumSamples());
 
+    // Process oversampled signal with simple hard clip + 3ms lookahead
+    // Oversampling handles anti-aliasing, no PolyBLEP needed
     for (int ch = 0; ch < juce::jmin(static_cast<int>(oversampledBlock.getNumChannels()), 2); ++ch)
     {
         auto* data = oversampledBlock.getChannelPointer(static_cast<size_t>(ch));
-        auto& lookaheadBuffer = softClipState[ch].lookaheadBuffer;
-        int& writePos = softClipState[ch].lookaheadWritePos;
+        auto& state = hardClipState[ch];
+        auto& lookaheadBuffer = state.lookaheadBuffer;
+        int& writePos = state.lookaheadWritePos;
 
         for (int i = 0; i < oversampledSamples; ++i)
         {
@@ -1317,26 +1106,104 @@ void QuadBlendDriveAudioProcessor::processSoftClip(juce::AudioBuffer<SampleType>
 
             writePos = (writePos + 1) % lookaheadSamples;
 
-            // Normalize input to ceiling range
-            const double normalizedInput = delayedSample / ceilingD;
-
-            // Exponential soft knee that gets steeper as signal approaches ceiling
-            // Uses tanh for smooth, asymptotic approach to ceiling (never hard clips)
-            const double sign = (normalizedInput >= 0.0) ? 1.0 : -1.0;
-            const double absInput = std::abs(normalizedInput);
-
-            // Knee controls saturation intensity: 0% = gentle, 100% = aggressive
-            // Scale knee to useful range for tanh-based saturation
-            const double saturation = 1.0 + (color * 4.0);  // 1.0 to 5.0
-
-            // Tanh-based soft saturation: progressively steeper as it approaches ceiling
-            // Never reaches ceiling, always smooth and asymptotic
-            double output = sign * std::tanh(absInput * saturation) / std::tanh(saturation);
-
-            // Scale back to ceiling range
-            output *= ceilingD;
-
+            // Simple hard clip processing (oversampling handles anti-aliasing)
+            const double output = juce::jlimit(-thresholdD, thresholdD, delayedSample);
             data[i] = static_cast<SampleType>(output);
+        }
+    }
+
+    // Downsample back to original rate
+    juce::dsp::AudioBlock<SampleType> outputBlock(buffer);
+    oversampling.processSamplesDown(outputBlock);
+}
+
+// Soft Clipping - Tanh saturation with dynamic drive
+// v1.5.0 Pristine Essentials: Simple tanh processing, oversampling is the ONLY anti-aliasing
+// MODE 0: Direct processing (no oversampling, no lookahead)
+// MODE 1: 8× oversampling + 3ms lookahead
+// MODE 2: 16× oversampling + 3ms lookahead
+template<typename SampleType>
+void QuadBlendDriveAudioProcessor::processSoftClip(juce::AudioBuffer<SampleType>& buffer,
+                                                     SampleType ceiling,
+                                                     SampleType knee,
+                                                     double sampleRate)
+{
+    // Get current processing mode (0 = Zero Latency, 1 = Balanced, 2 = Linear Phase)
+    int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
+
+    const double ceilingD = static_cast<double>(ceiling);
+    const double color = static_cast<double>(knee) / 100.0;  // Convert knee percentage to color (0-1)
+    const double drive = 1.0 + (color * 3.0);  // Drive: 1.0 to 4.0
+
+    // MODE 0: Zero Latency - Direct tanh, NO oversampling, NO lookahead
+    // Accept minimal aliasing as tradeoff for true zero latency
+    if (processingMode == 0)
+    {
+        for (int ch = 0; ch < juce::jmin(buffer.getNumChannels(), 2); ++ch)
+        {
+            auto* data = buffer.getWritePointer(ch);
+
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+            {
+                const double x = static_cast<double>(data[i]) / ceilingD;
+                const double output = std::tanh(x * drive);
+                data[i] = static_cast<SampleType>(output * ceilingD);
+            }
+        }
+        return;
+    }
+
+    // MODE 1 & 2: Balanced (8×) or Linear Phase (16×) - use oversampling + lookahead
+    juce::dsp::Oversampling<SampleType>* oversamplingPtr = nullptr;
+
+    if (std::is_same<SampleType, float>::value)
+    {
+        if (processingMode == 1)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedFloat.get());
+        else  // processingMode == 2
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseFloat.get());
+    }
+    else
+    {
+        if (processingMode == 1)
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedDouble.get());
+        else  // processingMode == 2
+            oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseDouble.get());
+    }
+
+    auto& oversampling = *oversamplingPtr;
+
+    // Upsample (8× for Balanced, 16× for Linear Phase)
+    auto oversampledBlock = oversampling.processSamplesUp(juce::dsp::AudioBlock<SampleType>(buffer));
+    const int oversampledSamples = static_cast<int>(oversampledBlock.getNumSamples());
+
+    // Process oversampled signal with 3ms lookahead for smooth transitions
+    for (int ch = 0; ch < juce::jmin(static_cast<int>(oversampledBlock.getNumChannels()), 2); ++ch)
+    {
+        auto* data = oversampledBlock.getChannelPointer(static_cast<size_t>(ch));
+        auto& lookaheadBuffer = softClipState[ch].lookaheadBuffer;
+        int& writePos = softClipState[ch].lookaheadWritePos;
+
+        for (int i = 0; i < oversampledSamples; ++i)
+        {
+            const double currentSample = static_cast<double>(data[i]);
+
+            // Store current sample in lookahead buffer
+            if (writePos >= 0 && writePos < static_cast<int>(lookaheadBuffer.size()))
+                lookaheadBuffer[writePos] = currentSample;
+
+            // Read delayed sample (3ms lookahead)
+            int readPos = (writePos + 1) % lookaheadSamples;
+            double delayedSample = currentSample;
+            if (readPos >= 0 && readPos < static_cast<int>(lookaheadBuffer.size()))
+                delayedSample = lookaheadBuffer[readPos];
+
+            writePos = (writePos + 1) % lookaheadSamples;
+
+            // Simple tanh processing (oversampling handles anti-aliasing)
+            const double x = delayedSample / ceilingD;
+            const double output = std::tanh(x * drive);
+            data[i] = static_cast<SampleType>(output * ceilingD);
         }
     }
 
@@ -1381,7 +1248,12 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
     const double thresholdD = static_cast<double>(threshold);
     const double kneeStart = thresholdD * std::pow(10.0, -kneeDB / 20.0);  // 3dB below threshold
 
-    // MODE 0: Zero Latency - NO oversampling, direct processing
+    // Gain smoothing filter coefficient to prevent control signal aliasing
+    // Cutoff ~20kHz at the effective sample rate (prevents GR signal from aliasing)
+    const double gainSmoothCutoff = 20000.0;  // 20 kHz cutoff
+    const double gainSmoothCoeff = std::exp(-2.0 * juce::MathConstants<double>::pi * gainSmoothCutoff / effectiveRate);
+
+    // MODE 0: Zero Latency - NO oversampling, NO lookahead, direct processing
     if (processingMode == 0)
     {
         for (int ch = 0; ch < juce::jmin(buffer.getNumChannels(), 2); ++ch)
@@ -1391,25 +1263,11 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
             double& rmsEnvelope = slowLimiterState[ch].rmsEnvelope;
             double& peakEnvelope = slowLimiterState[ch].peakEnvelope;
             double& smoothedCrestFactor = slowLimiterState[ch].smoothedCrestFactor;
-            auto& lookaheadBuffer = slowLimiterState[ch].lookaheadBuffer;
-            int& writePos = slowLimiterState[ch].lookaheadWritePos;
+            double& smoothedGain = slowLimiterState[ch].smoothedGain;
 
             for (int i = 0; i < buffer.getNumSamples(); ++i)
             {
                 const double currentSample = static_cast<double>(data[i]);
-
-                // Store current sample in lookahead buffer
-                if (writePos >= 0 && writePos < static_cast<int>(lookaheadBuffer.size()))
-                    lookaheadBuffer[writePos] = currentSample;
-
-                // Read delayed sample
-                int readPos = (writePos + 1) % lookaheadSamples;
-                double delayedSample = currentSample;
-                if (readPos >= 0 && readPos < static_cast<int>(lookaheadBuffer.size()))
-                    delayedSample = lookaheadBuffer[readPos];
-
-                writePos = (writePos + 1) % lookaheadSamples;
-
                 const double inputAbs = std::abs(currentSample);
 
                 // Track RMS envelope
@@ -1444,24 +1302,27 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
                 else
                     envelope = releaseCoeff * envelope + (1.0 - releaseCoeff) * inputAbs;
 
-                // Calculate gain reduction with soft knee
-                double gain = 1.0;
+                // Calculate raw gain reduction with soft knee (NO lookahead delay)
+                double targetGain = 1.0;
                 if (envelope <= kneeStart)
                 {
-                    gain = 1.0;
+                    targetGain = 1.0;
                 }
                 else if (envelope < thresholdD)
                 {
                     const double kneePos = (envelope - kneeStart) / (thresholdD - kneeStart);
                     const double compressionAmount = kneePos * kneePos;
-                    gain = 1.0 - compressionAmount * (1.0 - thresholdD / envelope);
+                    targetGain = 1.0 - compressionAmount * (1.0 - thresholdD / envelope);
                 }
                 else
                 {
-                    gain = thresholdD / envelope;
+                    targetGain = thresholdD / envelope;
                 }
 
-                data[i] = static_cast<SampleType>(delayedSample * gain);
+                // Apply one-pole low-pass filter to gain signal (prevents control signal aliasing)
+                smoothedGain = gainSmoothCoeff * smoothedGain + (1.0 - gainSmoothCoeff) * targetGain;
+
+                data[i] = static_cast<SampleType>(currentSample * smoothedGain);
             }
         }
         return;
@@ -1497,6 +1358,7 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
         double& rmsEnvelope = slowLimiterState[ch].rmsEnvelope;
         double& peakEnvelope = slowLimiterState[ch].peakEnvelope;
         double& smoothedCrestFactor = slowLimiterState[ch].smoothedCrestFactor;
+        double& smoothedGain = slowLimiterState[ch].smoothedGain;
         auto& lookaheadBuffer = slowLimiterState[ch].lookaheadBuffer;
         int& writePos = slowLimiterState[ch].lookaheadWritePos;
 
@@ -1560,27 +1422,30 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
             else
                 envelope = releaseCoeff * envelope + (1.0 - releaseCoeff) * inputAbs;
 
-            // Calculate gain reduction with soft knee
-            double gain = 1.0;
+            // Calculate raw gain reduction with soft knee
+            double targetGain = 1.0;
 
             if (envelope <= kneeStart)
             {
-                gain = 1.0;  // No limiting
+                targetGain = 1.0;  // No limiting
             }
             else if (envelope < thresholdD)
             {
                 // Soft knee region
                 const double kneePos = (envelope - kneeStart) / (thresholdD - kneeStart);
                 const double compressionAmount = kneePos * kneePos;  // Smooth curve
-                gain = 1.0 - compressionAmount * (1.0 - thresholdD / envelope);
+                targetGain = 1.0 - compressionAmount * (1.0 - thresholdD / envelope);
             }
             else
             {
                 // Above threshold - apply limiting
-                gain = thresholdD / envelope;
+                targetGain = thresholdD / envelope;
             }
 
-            data[i] = static_cast<SampleType>(delayedSample * gain);
+            // Apply one-pole low-pass filter to gain signal (prevents control signal aliasing)
+            smoothedGain = gainSmoothCoeff * smoothedGain + (1.0 - gainSmoothCoeff) * targetGain;
+
+            data[i] = static_cast<SampleType>(delayedSample * smoothedGain);
         }
     }
 
@@ -1611,32 +1476,23 @@ void QuadBlendDriveAudioProcessor::processFastLimit(juce::AudioBuffer<SampleType
     const double releaseCoeff = std::exp(-1.0 / (releaseMs * 0.001 * effectiveRate));
     const double thresholdD = static_cast<double>(threshold);
 
-    // MODE 0: Zero Latency - NO oversampling, direct processing
+    // Gain smoothing filter coefficient to prevent control signal aliasing
+    // Cutoff ~20kHz at the effective sample rate (prevents GR signal from aliasing)
+    const double gainSmoothCutoff = 20000.0;  // 20 kHz cutoff
+    const double gainSmoothCoeff = std::exp(-2.0 * juce::MathConstants<double>::pi * gainSmoothCutoff / effectiveRate);
+
+    // MODE 0: Zero Latency - NO oversampling, NO lookahead, direct processing
     if (processingMode == 0)
     {
         for (int ch = 0; ch < juce::jmin(buffer.getNumChannels(), 2); ++ch)
         {
             auto* data = buffer.getWritePointer(ch);
             double& envelope = fastLimiterState[ch].envelope;
-            auto& lookaheadBuffer = fastLimiterState[ch].lookaheadBuffer;
-            int& writePos = fastLimiterState[ch].lookaheadWritePos;
+            double& smoothedGain = fastLimiterState[ch].smoothedGain;
 
             for (int i = 0; i < buffer.getNumSamples(); ++i)
             {
                 const double currentSample = static_cast<double>(data[i]);
-
-                // Store current sample in lookahead buffer
-                if (writePos >= 0 && writePos < static_cast<int>(lookaheadBuffer.size()))
-                    lookaheadBuffer[writePos] = currentSample;
-
-                // Read delayed sample
-                int readPos = (writePos + 1) % lookaheadSamples;
-                double delayedSample = currentSample;
-                if (readPos >= 0 && readPos < static_cast<int>(lookaheadBuffer.size()))
-                    delayedSample = lookaheadBuffer[readPos];
-
-                writePos = (writePos + 1) % lookaheadSamples;
-
                 const double inputAbs = std::abs(currentSample);
 
                 // Envelope follower with attack/release
@@ -1648,17 +1504,20 @@ void QuadBlendDriveAudioProcessor::processFastLimit(juce::AudioBuffer<SampleType
                 // Clamp envelope to prevent extreme values
                 envelope = juce::jlimit(0.0, 10.0, envelope);
 
-                // Hard knee limiting
-                double gain = 1.0;
+                // Calculate raw gain reduction - hard knee limiting (NO lookahead delay)
+                double targetGain = 1.0;
                 if (envelope > thresholdD)
                 {
-                    gain = thresholdD / envelope;
+                    targetGain = thresholdD / envelope;
                 }
 
-                // Clamp gain to prevent artifacts
-                gain = juce::jlimit(0.01, 1.0, gain);
+                // Clamp target gain to prevent artifacts
+                targetGain = juce::jlimit(0.01, 1.0, targetGain);
 
-                data[i] = static_cast<SampleType>(delayedSample * gain);
+                // Apply one-pole low-pass filter to gain signal (prevents control signal aliasing)
+                smoothedGain = gainSmoothCoeff * smoothedGain + (1.0 - gainSmoothCoeff) * targetGain;
+
+                data[i] = static_cast<SampleType>(currentSample * smoothedGain);
             }
         }
         return;
@@ -1691,6 +1550,7 @@ void QuadBlendDriveAudioProcessor::processFastLimit(juce::AudioBuffer<SampleType
     {
         auto* data = oversampledBlock.getChannelPointer(static_cast<size_t>(ch));
         double& envelope = fastLimiterState[ch].envelope;
+        double& smoothedGain = fastLimiterState[ch].smoothedGain;
         auto& lookaheadBuffer = fastLimiterState[ch].lookaheadBuffer;
         int& writePos = fastLimiterState[ch].lookaheadWritePos;
 
@@ -1722,17 +1582,20 @@ void QuadBlendDriveAudioProcessor::processFastLimit(juce::AudioBuffer<SampleType
             // Clamp envelope to prevent extreme values
             envelope = juce::jlimit(0.0, 10.0, envelope);
 
-            // Hard knee limiting - no soft knee region
-            double gain = 1.0;
+            // Calculate raw gain reduction - hard knee limiting
+            double targetGain = 1.0;
             if (envelope > thresholdD)
             {
-                gain = thresholdD / envelope;
+                targetGain = thresholdD / envelope;
             }
 
-            // Clamp gain to prevent artifacts
-            gain = juce::jlimit(0.01, 1.0, gain);
+            // Clamp target gain to prevent artifacts
+            targetGain = juce::jlimit(0.01, 1.0, targetGain);
 
-            data[i] = static_cast<SampleType>(delayedSample * gain);
+            // Apply one-pole low-pass filter to gain signal (prevents control signal aliasing)
+            smoothedGain = gainSmoothCoeff * smoothedGain + (1.0 - gainSmoothCoeff) * targetGain;
+
+            data[i] = static_cast<SampleType>(delayedSample * smoothedGain);
         }
     }
 
@@ -1978,6 +1841,33 @@ void QuadBlendDriveAudioProcessor::processOvershootSuppression(juce::AudioBuffer
 
     // Downsample back to original rate using matching linear-phase FIR
     oversampling.processSamplesDown(block);
+
+    // === OSM MODE 0 CONSTANT LATENCY COMPENSATION ===
+    // Apply delay to match Mode 1 (Advanced TPL) lookahead latency
+    // This ensures the plugin reports constant latency regardless of OSM mode
+    const int osmDelay = advancedTPLLookaheadSamples;
+
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+    {
+        auto* data = buffer.getWritePointer(ch);
+        auto& compensationState = osmCompensationState[ch];
+
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        {
+            // Store current sample in delay buffer
+            compensationState.delayBuffer[compensationState.writePos] = static_cast<double>(data[i]);
+
+            // Read delayed sample from buffer
+            int readPos = compensationState.writePos;
+            double delayedSample = compensationState.delayBuffer[readPos];
+
+            // Advance write position (circular buffer)
+            compensationState.writePos = (compensationState.writePos + 1) % osmDelay;
+
+            // Output delayed sample
+            data[i] = static_cast<SampleType>(delayedSample);
+        }
+    }
 
     // Final safety clamp to ensure true-peak compliance
     for (int ch = 0; ch < buffer.getNumChannels(); ++ch)

@@ -893,11 +893,11 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     // Setup Overshoot Character Blend Control
     setupRotarySlider(overshootBlendSlider, overshootBlendLabel, "Character");
 
-    // Setup True Peak Limiter - Advanced TPL with IRC
-    overshootModeButton.setButtonText("TRUE PEAK");
+    // OSM Mode Selector: OFF = Mode 0 (Safety Clipper), ON = Mode 1 (Advanced TPL)
+    overshootModeButton.setButtonText("OSM: SAFE");  // OFF = "CLIP" mode, ON = "SAFE" mode
     overshootModeButton.setClickingTogglesState(true);
     overshootModeButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
-    overshootModeButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(220, 120, 80));
+    overshootModeButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(80, 180, 120));  // Green for "Safe" mode
     overshootModeButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
     overshootModeButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
     addAndMakeVisible(overshootModeButton);
@@ -941,7 +941,7 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     addAndMakeVisible(processingModeCombo);
 
     // Setup Version Label (upper right corner)
-    versionLabel.setText("v1.2.4", juce::dontSendNotification);
+    versionLabel.setText("v1.5.0", juce::dontSendNotification);
     versionLabel.setJustificationType(juce::Justification::centredRight);
     versionLabel.setFont(juce::Font(10.0f, juce::Font::plain));
     versionLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.5f));
@@ -993,28 +993,12 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     overshootBlendAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         p.apvts, "OVERSHOOT_BLEND", overshootBlendSlider);
     overshootModeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        p.apvts, "OVERSHOOT_MODE", overshootModeButton);
+        p.apvts, "OSM_MODE", overshootModeButton);
     processingModeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         p.apvts, "PROCESSING_MODE", processingModeCombo);
 
-    // Make limiter buttons mutually exclusive - only one can be on at a time
-    protectionEnableButton.onClick = [this]()
-    {
-        if (protectionEnableButton.getToggleState())
-        {
-            // Turn off True Peak when No Overshoot is enabled
-            audioProcessor.apvts.getParameter("OVERSHOOT_MODE")->setValueNotifyingHost(0.0f);
-        }
-    };
-
-    overshootModeButton.onClick = [this]()
-    {
-        if (overshootModeButton.getToggleState())
-        {
-            // Turn off No Overshoot when True Peak is enabled
-            audioProcessor.apvts.getParameter("PROTECTION_ENABLE")->setValueNotifyingHost(0.0f);
-        }
-    };
+    // OSM_MODE note: false = Mode 0 (Safety Clipper), true = Mode 1 (Advanced TPL)
+    // Both modes maintain constant latency via automatic compensation
 }
 
 QuadBlendDriveAudioProcessorEditor::~QuadBlendDriveAudioProcessorEditor()

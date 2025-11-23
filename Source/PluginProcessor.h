@@ -2,6 +2,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
+#include "OversamplingManager.h"
 
 class QuadBlendDriveAudioProcessor : public juce::AudioProcessor
 {
@@ -106,6 +107,11 @@ private:
     {
         std::vector<double> lookaheadBuffer;
         int lookaheadWritePos{0};
+        // PolyBLEP state (for anti-aliasing only at discontinuities)
+        double lastSample{0.0};  // Previous input sample for crossing detection
+        // Micro Clip Symmetry Restoration (DC blocker)
+        double dcBlockerZ1{0.0};  // Previous input for DC blocker
+        double dcBlockerZ2{0.0};  // Previous output for DC blocker
     };
     HardClipState hardClipState[2];  // Per channel
 
@@ -114,6 +120,14 @@ private:
     {
         std::vector<double> lookaheadBuffer;
         int lookaheadWritePos{0};
+        // ADAA state (Anti-Derivative Anti-Aliasing)
+        double x1{0.0};   // Previous input sample
+        double x2{0.0};   // Two samples ago (for 3rd order)
+        double F1{0.0};   // Antiderivative at x1
+        double F2{0.0};   // Antiderivative at x2 (for 3rd order)
+        // Micro Clip Symmetry Restoration (DC blocker)
+        double dcBlockerZ1{0.0};  // Previous input for DC blocker
+        double dcBlockerZ2{0.0};  // Previous output for DC blocker
     };
     SoftClipState softClipState[2];  // Per channel
 
@@ -127,6 +141,11 @@ private:
         double smoothedCrestFactor{1.0};   // Smoothed crest factor with exponential smoothing
         std::vector<double> lookaheadBuffer;
         int lookaheadWritePos{0};
+        // Gain smoothing state (prevents control signal aliasing)
+        double smoothedGain{1.0};          // Low-pass filtered gain reduction
+        // Micro Clip Symmetry Restoration (DC blocker)
+        double dcBlockerZ1{0.0};  // Previous input for DC blocker
+        double dcBlockerZ2{0.0};  // Previous output for DC blocker
     };
     SlowLimiterState slowLimiterState[2];  // Per channel
 
@@ -136,6 +155,11 @@ private:
         double envelope{0.0};
         std::vector<double> lookaheadBuffer;
         int lookaheadWritePos{0};
+        // Gain smoothing state (prevents control signal aliasing)
+        double smoothedGain{1.0};          // Low-pass filtered gain reduction
+        // Micro Clip Symmetry Restoration (DC blocker)
+        double dcBlockerZ1{0.0};  // Previous input for DC blocker
+        double dcBlockerZ2{0.0};  // Previous output for DC blocker
     };
     FastLimiterState fastLimiterState[2];  // Per channel
 
@@ -182,6 +206,15 @@ private:
     };
     AdvancedTPLState advancedTPLState[2];  // Per channel
 
+    // OSM Mode 0 delay compensation state (to match Mode 1 latency)
+    // When Mode 0 is active, this delay ensures constant plugin latency
+    struct OSMCompensationState
+    {
+        std::vector<double> delayBuffer;
+        int writePos{0};
+    };
+    OSMCompensationState osmCompensationState[2];  // Per channel
+
     // Three oversampling types for three processing modes (8x oversampling)
     // Zero Latency: Polyphase IIR (minimum-phase, ~0 latency)
     std::unique_ptr<juce::dsp::Oversampling<float>> oversamplingZeroLatencyFloat;
@@ -195,6 +228,9 @@ private:
     std::unique_ptr<juce::dsp::Oversampling<float>> oversamplingLinearPhaseFloat;
     std::unique_ptr<juce::dsp::Oversampling<double>> oversamplingLinearPhaseDouble;
 
+    // Architecture A: Global oversampling manager (replaces individual oversamplers above)
+    OversamplingManager osManager;
+
     int lookaheadSamples{0};
     int advancedTPLLookaheadSamples{0};      // Lookahead for advanced TPL (1-3ms)
     int protectionLookaheadSamples{0};           // No longer used (overshoot suppression is zero-latency)
@@ -207,20 +243,7 @@ private:
     int linearPhaseModeLatencySamples{0};        // Linear Phase mode latency (~128 samples)
     int maxModeLatencySamples{0};                // Maximum of Balanced and Linear Phase modes
 
-    // Compensation delays for each mode to match maxModeLatencySamples
-    int zeroLatencyCompensationSamples{0};       // Delay needed for Zero Latency mode (= maxModeLatencySamples)
-    int balancedCompensationSamples{0};          // Delay needed for Balanced mode (= maxModeLatencySamples - balancedModeLatencySamples)
-    int linearPhaseCompensationSamples{0};       // Delay needed for Linear Phase mode (= 0, since it's the max)
-
-    // Mode compensation delay buffers (to time-align modes)
-    struct ModeCompensationState
-    {
-        std::vector<double> delayBuffer;
-        int writePos{0};
-    };
-    ModeCompensationState modeCompensationState[2];  // Per channel
-
-    // Dry signal delay compensation buffers (to match 3ms lookahead)
+    // Dry signal delay compensation buffers (to match processing latency per mode)
     struct DryDelayState
     {
         std::vector<double> delayBuffer;
