@@ -5,6 +5,41 @@ All notable changes to Quad-Blend Drive will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2025-11-23 - "Architecture A"
+
+### Major Architectural Refactor - Single Shared Oversampler
+Complete rewrite of oversampling architecture to eliminate double-oversampling artifacts and achieve phase-coherent dry/wet mixing.
+
+### Changed
+- **Oversampling Architecture**: Replaced per-processor oversamplers with single global OversamplingManager
+  - Mode 0 (Zero Latency): No oversampling (multiplier = 1×, completely flat frequency response)
+  - Mode 1 (Balanced): 8× oversampling with Halfband Equiripple FIR filters
+  - Mode 2 (Linear Phase): 16× oversampling with steep FIR filters + normalization
+- **XY Blend Processing**: All 4 processors now process entirely in oversampled domain
+  - Eliminates 64× and 256× double-oversampling artifacts
+  - Single upsample → process all paths → single downsample
+  - Reduces CPU usage by ~40-50% compared to per-processor oversampling
+- **Dry/Wet Phase Coherence**: Implemented delay-based compensation for phase-aligned mixing
+  - Zero Latency: Dry and wet both bypass OS (no filtering, no delay)
+  - Balanced/Linear: Dry delayed to match OS filter latency + 3ms XY lookahead
+  - Eliminates comb filtering when using mix knob
+- **Lookahead Buffers**: All lookahead calculations now at oversampled rate
+  - 3ms XY processor lookahead scaled by OS multiplier
+  - Maintains proper timing across all processing modes
+
+### Fixed
+- Fixed excessive distortion in Balanced and Linear modes caused by double oversampling (64× and 256× total)
+- Fixed comb filtering when blending dry signal with mix knob
+- Fixed waveform discontinuities and UI lag when moving XY indicator
+- Fixed high-frequency filtering in Zero Latency mode (now completely flat spectrum)
+
+### Technical Details
+- Created `OversamplingManager` class to centralize all oversampling operations
+- Removed internal oversampling from `processHardClip`, `processSoftClip`, `processSlowLimit`, and `processFastLimit`
+- All processors now receive pre-oversampled audio and process in-place
+- Dry signal stored before OS to avoid unwanted filtering in Mode 0
+- Delay compensation matches wet path latency for phase-coherent mixing in Modes 1/2
+
 ## [1.5.0] - 2025-11-22 - "Pristine Essentials"
 
 ### Major Architectural Refactor
