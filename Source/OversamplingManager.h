@@ -152,6 +152,11 @@ public:
     bool isOversampling() const { return osFactor > 0; }
 
     /**
+     * Get current processing mode (0 = Zero Latency, 1 = Balanced, 2 = Linear Phase)
+     */
+    int getProcessingMode() const { return mode; }
+
+    /**
      * Reset oversampling state (call when audio stops)
      */
     void reset()

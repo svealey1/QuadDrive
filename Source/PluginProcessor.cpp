@@ -703,8 +703,10 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     const SampleType slTrimGain = juce::Decibels::decibelsToGain(slTrimDB);
     const SampleType flTrimGain = juce::Decibels::decibelsToGain(flTrimDB);
 
-    // Get current processing mode (needed for dry signal processing)
-    int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
+    // Get current processing mode from osManager (not from parameter!)
+    // This ensures delay compensation matches the mode osManager was prepared with
+    // Reading the parameter directly would cause mode mismatch if changed during playback
+    const int processingMode = osManager.getProcessingMode();
 
     // === PEAK ANALYSIS (using double precision) ===
     if (analyzingEnabled)
@@ -1045,7 +1047,7 @@ void QuadBlendDriveAudioProcessor::processHardClip(juce::AudioBuffer<SampleType>
     // Mode 1: Buffer at 8× OS rate
     // Mode 2: Buffer at 16× OS rate
 
-    int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
+    const int processingMode = osManager.getProcessingMode();
     const double thresholdD = static_cast<double>(threshold);
 
     // MODE 0: Zero Latency - Direct hard clip, NO lookahead
@@ -1107,8 +1109,8 @@ void QuadBlendDriveAudioProcessor::processSoftClip(juce::AudioBuffer<SampleType>
                                                      SampleType knee,
                                                      double sampleRate)
 {
-    // Get current processing mode (0 = Zero Latency, 1 = Balanced, 2 = Linear Phase)
-    int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
+    // Get current processing mode from osManager
+    const int processingMode = osManager.getProcessingMode();
 
     const double ceilingD = static_cast<double>(ceiling);
     const double color = static_cast<double>(knee) / 100.0;  // Convert knee percentage to color (0-1)
@@ -1174,8 +1176,8 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
                                                       SampleType baseReleaseMs,
                                                       double sampleRate)
 {
-    // Get current processing mode (0 = Zero Latency, 1 = Balanced, 2 = Linear Phase)
-    int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
+    // Get current processing mode from osManager
+    const int processingMode = osManager.getProcessingMode();
 
     // Fixed parameters for Slow Limiter
     const double attackMs = 3.0;                    // 3ms attack
@@ -1389,8 +1391,8 @@ void QuadBlendDriveAudioProcessor::processFastLimit(juce::AudioBuffer<SampleType
                                                       SampleType threshold,
                                                       double sampleRate)
 {
-    // Get current processing mode (0 = Zero Latency, 1 = Balanced, 2 = Linear Phase)
-    int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
+    // Get current processing mode from osManager
+    const int processingMode = osManager.getProcessingMode();
 
     // Fixed parameters for Fast Limiter
     const double attackMs = 1.0;        // 1ms attack
