@@ -703,9 +703,15 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     const SampleType slTrimGain = juce::Decibels::decibelsToGain(slTrimDB);
     const SampleType flTrimGain = juce::Decibels::decibelsToGain(flTrimDB);
 
-    // Get current processing mode from osManager (not from parameter!)
-    // This ensures delay compensation matches the mode osManager was prepared with
-    // Reading the parameter directly would cause mode mismatch if changed during playback
+    // Check if processing mode has changed and reconfigure osManager if needed
+    const int parameterMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
+    if (parameterMode != osManager.getProcessingMode())
+    {
+        // Mode changed during playback - reconfigure osManager immediately
+        osManager.prepare(currentSampleRate, numSamples, parameterMode);
+    }
+
+    // Get current processing mode from osManager
     const int processingMode = osManager.getProcessingMode();
 
     // === PEAK ANALYSIS (using double precision) ===

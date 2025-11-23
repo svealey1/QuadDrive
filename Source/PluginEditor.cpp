@@ -1191,18 +1191,18 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     // ========== CENTER SECTION (XY PAD) - CENTERED AND SQUARE ==========
     auto centerSection = bounds.removeFromLeft(centerColumnWidth).reduced(padding, 0);
 
-    // Processing Mode Selector above XY Pad
+    // Processing Mode Selector above XY Pad (centered over XY grid)
     auto processingModeRow = centerSection.removeFromTop(static_cast<int>(32 * scale));
     int processingModeWidth = static_cast<int>(280 * scale);
     int processingModeLabelWidth = static_cast<int>(60 * scale);
     int processingModeComboWidth = static_cast<int>(160 * scale);
-    int processingModeXStart = (centerSection.getWidth() - processingModeWidth) / 2;
+    int processingModeXOffset = (processingModeRow.getWidth() - processingModeWidth) / 2;
 
-    processingModeLabel.setBounds(processingModeXStart,
+    processingModeLabel.setBounds(processingModeRow.getX() + processingModeXOffset,
                                   processingModeRow.getY(),
                                   processingModeLabelWidth,
                                   static_cast<int>(28 * scale));
-    processingModeCombo.setBounds(processingModeXStart + processingModeLabelWidth + static_cast<int>(8 * scale),
+    processingModeCombo.setBounds(processingModeRow.getX() + processingModeXOffset + processingModeLabelWidth + static_cast<int>(8 * scale),
                                   processingModeRow.getY(),
                                   processingModeComboWidth,
                                   static_cast<int>(28 * scale));
