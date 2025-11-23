@@ -143,7 +143,7 @@ public:
     {
         if (osFactor == 0)
             return 0;
-        return oversamplerFloat ? static_cast<int>(oversamplerFloat->getLatencySamples()) : 0;
+        return oversamplerFloat ? static_cast<int>(oversamplerFloat->getLatencyInSamples()) : 0;
     }
 
     /**

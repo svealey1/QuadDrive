@@ -78,6 +78,10 @@ private:
     template<typename SampleType>
     void processBlockInternal(juce::AudioBuffer<SampleType>& buffer, juce::MidiBuffer& midiMessages);
 
+    // Architecture A: XY Blend processing (runs entirely in OS domain)
+    template<typename SampleType>
+    void processXYBlend(juce::AudioBuffer<SampleType>& buffer, double osSampleRate);
+
     // Processing functions for each type (templated for float/double)
     template<typename SampleType>
     void processHardClip(juce::AudioBuffer<SampleType>& buffer, SampleType threshold, double sampleRate);

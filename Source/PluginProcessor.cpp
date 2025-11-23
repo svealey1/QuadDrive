@@ -2042,7 +2042,140 @@ void QuadBlendDriveAudioProcessor::processAdvancedTPL(juce::AudioBuffer<SampleTy
 }
 
 //==============================================================================
+// Architecture A: XY Blend Processing (runs entirely in OS domain)
+template<typename SampleType>
+void QuadBlendDriveAudioProcessor::processXYBlend(juce::AudioBuffer<SampleType>& buffer, double osSampleRate)
+{
+    const int numSamples = buffer.getNumSamples();  // Already in OS domain
+
+    // Get correct temp buffers for this precision
+    auto& tempBuffer1 = std::is_same<SampleType, float>::value ?
+                        reinterpret_cast<juce::AudioBuffer<SampleType>&>(tempBuffer1Float) :
+                        reinterpret_cast<juce::AudioBuffer<SampleType>&>(tempBuffer1Double);
+    auto& tempBuffer2 = std::is_same<SampleType, float>::value ?
+                        reinterpret_cast<juce::AudioBuffer<SampleType>&>(tempBuffer2Float) :
+                        reinterpret_cast<juce::AudioBuffer<SampleType>&>(tempBuffer2Double);
+    auto& tempBuffer3 = std::is_same<SampleType, float>::value ?
+                        reinterpret_cast<juce::AudioBuffer<SampleType>&>(tempBuffer3Float) :
+                        reinterpret_cast<juce::AudioBuffer<SampleType>&>(tempBuffer3Double);
+    auto& tempBuffer4 = std::is_same<SampleType, float>::value ?
+                        reinterpret_cast<juce::AudioBuffer<SampleType>&>(tempBuffer4Float) :
+                        reinterpret_cast<juce::AudioBuffer<SampleType>&>(tempBuffer4Double);
+
+    // Ensure temp buffers are sized for OS domain
+    tempBuffer1.setSize(2, numSamples, false, false, true);
+    tempBuffer2.setSize(2, numSamples, false, false, true);
+    tempBuffer3.setSize(2, numSamples, false, false, true);
+    tempBuffer4.setSize(2, numSamples, false, false, true);
+
+    // Read parameters (same as before, but at OS rate)
+    const SampleType xyX = static_cast<SampleType>(apvts.getRawParameterValue("XY_X_PARAM")->load());
+    const SampleType xyY = static_cast<SampleType>(apvts.getRawParameterValue("XY_Y_PARAM")->load());
+    const SampleType thresholdDB = static_cast<SampleType>(apvts.getRawParameterValue("THRESHOLD")->load());
+    const SampleType scKneePercent = static_cast<SampleType>(apvts.getRawParameterValue("SC_KNEE")->load());
+    const SampleType limitRelMs = static_cast<SampleType>(apvts.getRawParameterValue("LIMIT_REL")->load());
+
+    const SampleType hcTrimDB = static_cast<SampleType>(apvts.getRawParameterValue("HC_TRIM")->load());
+    const SampleType scTrimDB = static_cast<SampleType>(apvts.getRawParameterValue("SC_TRIM")->load());
+    const SampleType slTrimDB = static_cast<SampleType>(apvts.getRawParameterValue("SL_TRIM")->load());
+    const SampleType flTrimDB = static_cast<SampleType>(apvts.getRawParameterValue("FL_TRIM")->load());
+
+    const bool hcMute = apvts.getRawParameterValue("HC_MUTE")->load() > 0.5f;
+    const bool scMute = apvts.getRawParameterValue("SC_MUTE")->load() > 0.5f;
+    const bool slMute = apvts.getRawParameterValue("SL_MUTE")->load() > 0.5f;
+    const bool flMute = apvts.getRawParameterValue("FL_MUTE")->load() > 0.5f;
+
+    const SampleType threshold = juce::Decibels::decibelsToGain(thresholdDB);
+    const SampleType scKnee = scKneePercent / static_cast<SampleType>(100.0);
+    const SampleType hcTrimGain = juce::Decibels::decibelsToGain(hcTrimDB);
+    const SampleType scTrimGain = juce::Decibels::decibelsToGain(scTrimDB);
+    const SampleType slTrimGain = juce::Decibels::decibelsToGain(slTrimDB);
+    const SampleType flTrimGain = juce::Decibels::decibelsToGain(flTrimDB);
+
+    // Calculate bi-linear blend weights from XY pad
+    SampleType wSL = (static_cast<SampleType>(1.0) - xyX) * xyY;  // Top-left
+    SampleType wHC = xyX * xyY;  // Top-right
+    SampleType wSC = (static_cast<SampleType>(1.0) - xyX) * (static_cast<SampleType>(1.0) - xyY);  // Bottom-left
+    SampleType wFL = xyX * (static_cast<SampleType>(1.0) - xyY);  // Bottom-right
+
+    // Apply mute logic
+    if (hcMute) wHC = static_cast<SampleType>(0.0);
+    if (scMute) wSC = static_cast<SampleType>(0.0);
+    if (slMute) wSL = static_cast<SampleType>(0.0);
+    if (flMute) wFL = static_cast<SampleType>(0.0);
+
+    // Renormalize weights
+    const SampleType weightSum = wHC + wSC + wSL + wFL;
+    const bool allProcessorsMuted = (weightSum <= static_cast<SampleType>(1e-10));
+
+    if (allProcessorsMuted)
+        return;  // All processors muted - buffer unchanged (pristine passthrough)
+
+    const SampleType normFactor = static_cast<SampleType>(1.0) / weightSum;
+    wHC *= normFactor;
+    wSC *= normFactor;
+    wSL *= normFactor;
+    wFL *= normFactor;
+
+    // Copy input to temp buffers for parallel processing
+    tempBuffer1.makeCopyOf(buffer);
+    tempBuffer2.makeCopyOf(buffer);
+    tempBuffer3.makeCopyOf(buffer);
+    tempBuffer4.makeCopyOf(buffer);
+
+    // Process all 4 paths (now at OS rate - no internal oversampling needed)
+    tempBuffer1.applyGain(hcTrimGain);
+    processHardClip(tempBuffer1, threshold, osSampleRate);
+
+    tempBuffer2.applyGain(scTrimGain);
+    processSoftClip(tempBuffer2, threshold, scKnee, osSampleRate);
+
+    tempBuffer3.applyGain(slTrimGain);
+    processSlowLimit(tempBuffer3, threshold, limitRelMs, osSampleRate);
+
+    tempBuffer4.applyGain(flTrimGain);
+    processFastLimit(tempBuffer4, threshold, osSampleRate);
+
+    // Apply compensation gains if enabled
+    const bool masterCompEnabled = apvts.getRawParameterValue("MASTER_COMP")->load() > 0.5f;
+    if (masterCompEnabled)
+    {
+        const bool hcCompEnabled = apvts.getRawParameterValue("HC_COMP")->load() > 0.5f;
+        const bool scCompEnabled = apvts.getRawParameterValue("SC_COMP")->load() > 0.5f;
+        const bool slCompEnabled = apvts.getRawParameterValue("SL_COMP")->load() > 0.5f;
+        const bool flCompEnabled = apvts.getRawParameterValue("FL_COMP")->load() > 0.5f;
+
+        if (hcCompEnabled && std::abs(hcTrimGain - static_cast<SampleType>(1.0)) > static_cast<SampleType>(1e-6))
+            tempBuffer1.applyGain(static_cast<SampleType>(1.0) / hcTrimGain);
+        if (scCompEnabled && std::abs(scTrimGain - static_cast<SampleType>(1.0)) > static_cast<SampleType>(1e-6))
+            tempBuffer2.applyGain(static_cast<SampleType>(1.0) / scTrimGain);
+        if (slCompEnabled && std::abs(slTrimGain - static_cast<SampleType>(1.0)) > static_cast<SampleType>(1e-6))
+            tempBuffer3.applyGain(static_cast<SampleType>(1.0) / slTrimGain);
+        if (flCompEnabled && std::abs(flTrimGain - static_cast<SampleType>(1.0)) > static_cast<SampleType>(1e-6))
+            tempBuffer4.applyGain(static_cast<SampleType>(1.0) / flTrimGain);
+    }
+
+    // Blend the four paths (happens in OS domain - major quality improvement)
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+    {
+        auto* dest = buffer.getWritePointer(ch);
+        const auto* src1 = tempBuffer1.getReadPointer(ch);
+        const auto* src2 = tempBuffer2.getReadPointer(ch);
+        const auto* src3 = tempBuffer3.getReadPointer(ch);
+        const auto* src4 = tempBuffer4.getReadPointer(ch);
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            dest[i] = wHC * src1[i] + wSC * src2[i] + wSL * src3[i] + wFL * src4[i];
+        }
+    }
+}
+
+//==============================================================================
 // Explicit template instantiations
+template void QuadBlendDriveAudioProcessor::processXYBlend<float>(juce::AudioBuffer<float>&, double);
+template void QuadBlendDriveAudioProcessor::processXYBlend<double>(juce::AudioBuffer<double>&, double);
+
 template void QuadBlendDriveAudioProcessor::processHardClip<float>(juce::AudioBuffer<float>&, float, double);
 template void QuadBlendDriveAudioProcessor::processHardClip<double>(juce::AudioBuffer<double>&, double, double);
 
