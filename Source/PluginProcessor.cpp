@@ -437,10 +437,13 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
     // Reset all processor states and allocate lookahead buffers (3ms for all)
     for (int ch = 0; ch < 2; ++ch)
     {
-        // v1.5.0: Dry delay buffers sized for maximum latency (Linear Phase mode)
-        // Actual delay amount is set per-mode in processBlock
-        // Buffer must be large enough to handle any mode
-        const int maxDryDelay = linearPhaseModeLatencySamples + lookaheadSamples;
+        // Architecture A: Dry delay buffers sized for maximum latency
+        // Max latency = OS filter latency + XY lookahead (at base rate)
+        // Worst case is Linear Phase mode (16× OS has highest filter latency)
+        constexpr double xyProcessorLookaheadMs = 3.0;
+        const int maxOsFilterLatency = osManager.getLatencySamples();  // At base rate
+        const int xyLookaheadBaseSamples = static_cast<int>(std::ceil(sampleRate * xyProcessorLookaheadMs / 1000.0));
+        const int maxDryDelay = maxOsFilterLatency + xyLookaheadBaseSamples;
         dryDelayState[ch].delayBuffer.resize(maxDryDelay, 0.0);
         dryDelayState[ch].writePos = 0;
 
@@ -851,24 +854,24 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     }
     else
     {
-        // === DRY SIGNAL DELAY COMPENSATION (PER MODE) ===
-        // v1.5.0: Dry signal delayed to match wet path latency (per-mode)
-        // This ensures time-aligned wet/dry mixing
-        // Mode 0: 0 delay (zero latency)
-        // Mode 1: balancedModeLatencySamples + lookaheadSamples
-        // Mode 2: linearPhaseModeLatencySamples + lookaheadSamples
+        // === DRY SIGNAL DELAY COMPENSATION (Architecture A) ===
+        // Dry signal delayed to match wet path latency for phase-aligned mixing
+        // Wet path latency = OS filter latency + XY processor lookahead (3ms)
         int dryDelayAmount = 0;
         if (processingMode == 0)
         {
-            dryDelayAmount = 0;  // Zero Latency mode: no delay
+            dryDelayAmount = 0;  // Zero Latency mode: no oversampling, no lookahead
         }
-        else if (processingMode == 1)
+        else  // Mode 1 (Balanced 8×) or Mode 2 (Linear Phase 16×)
         {
-            dryDelayAmount = balancedModeLatencySamples + lookaheadSamples;
-        }
-        else  // processingMode == 2
-        {
-            dryDelayAmount = linearPhaseModeLatencySamples + lookaheadSamples;
+            // OS filter latency (at base rate) from osManager
+            const int osFilterLatency = osManager.getLatencySamples();
+
+            // XY processor lookahead converted to base rate (3ms at base rate)
+            constexpr double xyProcessorLookaheadMs = 3.0;
+            const int xyLookaheadBaseSamples = static_cast<int>(std::ceil(currentSampleRate * xyProcessorLookaheadMs / 1000.0));
+
+            dryDelayAmount = osFilterLatency + xyLookaheadBaseSamples;
         }
 
         if (dryDelayAmount > 0)
