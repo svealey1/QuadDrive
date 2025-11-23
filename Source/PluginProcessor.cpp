@@ -737,35 +737,26 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
         osManager.prepare(currentSampleRate, numSamples, parameterMode);
 
         // Also reinitialize 4-channel oversampler for phase-coherent dry/wet
+        // IMPORTANT: Create BOTH float and double versions since both template instantiations can be called
         if (parameterMode == 1)  // Balanced
         {
-            if (std::is_same<SampleType, float>::value)
-            {
-                oversamplingCombined4ChFloat = std::make_unique<juce::dsp::Oversampling<float>>(
-                    4, 3, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, false, false);
-                oversamplingCombined4ChFloat->initProcessing(static_cast<size_t>(numSamples));
-            }
-            else
-            {
-                oversamplingCombined4ChDouble = std::make_unique<juce::dsp::Oversampling<double>>(
-                    4, 3, juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple, false, false);
-                oversamplingCombined4ChDouble->initProcessing(static_cast<size_t>(numSamples));
-            }
+            oversamplingCombined4ChFloat = std::make_unique<juce::dsp::Oversampling<float>>(
+                4, 3, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, false, false);
+            oversamplingCombined4ChFloat->initProcessing(static_cast<size_t>(numSamples));
+
+            oversamplingCombined4ChDouble = std::make_unique<juce::dsp::Oversampling<double>>(
+                4, 3, juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple, false, false);
+            oversamplingCombined4ChDouble->initProcessing(static_cast<size_t>(numSamples));
         }
         else if (parameterMode == 2)  // Linear Phase
         {
-            if (std::is_same<SampleType, float>::value)
-            {
-                oversamplingCombined4ChFloat = std::make_unique<juce::dsp::Oversampling<float>>(
-                    4, 4, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true, true);
-                oversamplingCombined4ChFloat->initProcessing(static_cast<size_t>(numSamples));
-            }
-            else
-            {
-                oversamplingCombined4ChDouble = std::make_unique<juce::dsp::Oversampling<double>>(
-                    4, 4, juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple, true, true);
-                oversamplingCombined4ChDouble->initProcessing(static_cast<size_t>(numSamples));
-            }
+            oversamplingCombined4ChFloat = std::make_unique<juce::dsp::Oversampling<float>>(
+                4, 4, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true, true);
+            oversamplingCombined4ChFloat->initProcessing(static_cast<size_t>(numSamples));
+
+            oversamplingCombined4ChDouble = std::make_unique<juce::dsp::Oversampling<double>>(
+                4, 4, juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple, true, true);
+            oversamplingCombined4ChDouble->initProcessing(static_cast<size_t>(numSamples));
         }
         else  // Mode 0
         {
@@ -883,31 +874,55 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
             ? reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingCombined4ChFloat.get())
             : reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingCombined4ChDouble.get());
 
-        // Upsample all 4 channels together (identical phase)
-        juce::dsp::AudioBlock<SampleType> combinedBlock(combinedBuffer);
-        auto oversampledCombined = oversampler4Ch->processSamplesUp(combinedBlock);
-        const int osNumSamples = static_cast<int>(oversampledCombined.getNumSamples());
-
-        // Extract wet channels (0-1) for processing
-        if (!allProcessorsMuted)
+        // Safety check - if oversampler not initialized, fall back to simple processing
+        if (!oversampler4Ch)
         {
-            SampleType* wetChannelPointers[2];
-            for (int ch = 0; ch < 2; ++ch)
-                wetChannelPointers[ch] = oversampledCombined.getChannelPointer(static_cast<size_t>(ch));
+            // Process wet only (dry stays as-is from line 856)
+            auto osBlock = osManager.upsampleBlock(buffer);
+            const int osNumSamples = static_cast<int>(osBlock.getNumSamples());
+            const int osNumChannels = static_cast<int>(osBlock.getNumChannels());
 
-            juce::AudioBuffer<SampleType> wetOsBuffer(wetChannelPointers, 2, osNumSamples);
-            processXYBlend(wetOsBuffer, osManager.getOsSampleRate());
+            if (!allProcessorsMuted)
+            {
+                SampleType* channelPointers[2];
+                for (int ch = 0; ch < osNumChannels; ++ch)
+                    channelPointers[ch] = osBlock.getChannelPointer(static_cast<size_t>(ch));
+
+                juce::AudioBuffer<SampleType> osBuffer(channelPointers, osNumChannels, osNumSamples);
+                processXYBlend(osBuffer, osManager.getOsSampleRate());
+            }
+
+            osManager.downsampleBlock(buffer, osBlock);
+            // Note: dryBuffer unmodified (phase mismatch will occur, but better than crashing)
         }
-        // Dry channels (2-3) pass through untouched
-
-        // Downsample all 4 channels together
-        oversampler4Ch->processSamplesDown(combinedBlock);
-
-        // Split back: wet to buffer, dry to dryBuffer
-        for (int ch = 0; ch < 2; ++ch)
+        else
         {
-            buffer.copyFrom(ch, 0, combinedBuffer, ch, 0, numSamples);
-            dryBuffer.copyFrom(ch, 0, combinedBuffer, ch + 2, 0, numSamples);
+            // 4-channel phase-coherent processing
+            juce::dsp::AudioBlock<SampleType> combinedBlock(combinedBuffer);
+            auto oversampledCombined = oversampler4Ch->processSamplesUp(combinedBlock);
+            const int osNumSamples = static_cast<int>(oversampledCombined.getNumSamples());
+
+            // Extract wet channels (0-1) for processing
+            if (!allProcessorsMuted)
+            {
+                SampleType* wetChannelPointers[2];
+                for (int ch = 0; ch < 2; ++ch)
+                    wetChannelPointers[ch] = oversampledCombined.getChannelPointer(static_cast<size_t>(ch));
+
+                juce::AudioBuffer<SampleType> wetOsBuffer(wetChannelPointers, 2, osNumSamples);
+                processXYBlend(wetOsBuffer, osManager.getOsSampleRate());
+            }
+            // Dry channels (2-3) pass through untouched
+
+            // Downsample all 4 channels together
+            oversampler4Ch->processSamplesDown(combinedBlock);
+
+            // Split back: wet to buffer, dry to dryBuffer
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                buffer.copyFrom(ch, 0, combinedBuffer, ch, 0, numSamples);
+                dryBuffer.copyFrom(ch, 0, combinedBuffer, ch + 2, 0, numSamples);
+            }
         }
     }
 
