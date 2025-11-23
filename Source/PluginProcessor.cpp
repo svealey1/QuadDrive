@@ -195,6 +195,53 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
     // Mode 2: 16× OS (multiplier = 16)
     osManager.prepare(sampleRate, samplesPerBlock, processingMode);
 
+    // ===== TEMPORARY: Old oversampling objects for processBlockInternal =====
+    // TODO: Remove in Phase 3 when processBlockInternal is refactored
+    // Initialize ALL three types (old code initialized all, not just current mode)
+    constexpr size_t oversamplingFactor = 3;  // 2^3 = 8× oversampling
+    constexpr size_t numChannels = 2;
+
+    // MODE 0: Zero Latency (Minimum-Phase Polyphase IIR)
+    oversamplingZeroLatencyFloat = std::make_unique<juce::dsp::Oversampling<float>>(
+        numChannels, oversamplingFactor,
+        juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR,
+        false, false);  // No steep filter, no normalization (minimum-phase)
+
+    oversamplingZeroLatencyDouble = std::make_unique<juce::dsp::Oversampling<double>>(
+        numChannels, oversamplingFactor,
+        juce::dsp::Oversampling<double>::filterHalfBandPolyphaseIIR,
+        false, false);
+
+    // MODE 1: Balanced (Halfband Equiripple FIR)
+    oversamplingBalancedFloat = std::make_unique<juce::dsp::Oversampling<float>>(
+        numChannels, oversamplingFactor,
+        juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple,
+        true, false);  // Steep, no normalization
+
+    oversamplingBalancedDouble = std::make_unique<juce::dsp::Oversampling<double>>(
+        numChannels, oversamplingFactor,
+        juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple,
+        true, false);
+
+    // MODE 2: Linear Phase (High-Order FIR with normalization)
+    oversamplingLinearPhaseFloat = std::make_unique<juce::dsp::Oversampling<float>>(
+        numChannels, oversamplingFactor,
+        juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple,
+        true, true);  // Steep + normalization for maximum quality
+
+    oversamplingLinearPhaseDouble = std::make_unique<juce::dsp::Oversampling<double>>(
+        numChannels, oversamplingFactor,
+        juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple,
+        true, true);
+
+    // Initialize all oversampling objects
+    oversamplingZeroLatencyFloat->initProcessing(static_cast<size_t>(samplesPerBlock));
+    oversamplingZeroLatencyDouble->initProcessing(static_cast<size_t>(samplesPerBlock));
+    oversamplingBalancedFloat->initProcessing(static_cast<size_t>(samplesPerBlock));
+    oversamplingBalancedDouble->initProcessing(static_cast<size_t>(samplesPerBlock));
+    oversamplingLinearPhaseFloat->initProcessing(static_cast<size_t>(samplesPerBlock));
+    oversamplingLinearPhaseDouble->initProcessing(static_cast<size_t>(samplesPerBlock));
+
     // Get OS sample rate for all processor calculations
     const double osSampleRate = osManager.getOsSampleRate();
     const int osMultiplier = osManager.getOsMultiplier();
@@ -717,70 +764,41 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
         wHC = wSC = wSL = wFL = static_cast<SampleType>(0.0);
     }
 
-    // === PROCESSING OPTIMIZATION ===
-    // If all processors are muted, skip processing entirely (pristine passthrough of gained input)
+    // === ARCHITECTURE A: GLOBAL OVERSAMPLING + XY BLEND PROCESSING ===
+    // Single upsample → process all 4 paths → blend → downsample
+    // This replaces the old per-processor oversampling approach
     if (!allProcessorsMuted)
     {
-        // Copy input to temp buffers for parallel processing
-        tempBuffer1.makeCopyOf(buffer);
-        tempBuffer2.makeCopyOf(buffer);
-        tempBuffer3.makeCopyOf(buffer);
-        tempBuffer4.makeCopyOf(buffer);
+        // Step 1: Upsample to OS domain (1×, 8×, or 16× depending on mode)
+        auto osBlock = osManager.upsampleBlock(buffer);
+        const int osNumSamples = static_cast<int>(osBlock.getNumSamples());
+        const int osNumChannels = static_cast<int>(osBlock.getNumChannels());
 
-        // Process Path 1: Hard Clipping
-        tempBuffer1.applyGain(hcTrimGain);
-        processHardClip(tempBuffer1, threshold, currentSampleRate);
-
-        // Process Path 2: Soft Clipping
-        tempBuffer2.applyGain(scTrimGain);
-        processSoftClip(tempBuffer2, threshold, scKnee, currentSampleRate);
-
-        // Process Path 3: Slow Limiting (Adaptive Auto-Release)
-        tempBuffer3.applyGain(slTrimGain);
-        processSlowLimit(tempBuffer3, threshold, limitRelMs, currentSampleRate);
-
-        // Process Path 4: Fast Limiting (Hard Knee Fast)
-        tempBuffer4.applyGain(flTrimGain);
-        processFastLimit(tempBuffer4, threshold, currentSampleRate);
-
-        // === GAIN COMPENSATION ===
-        // If master compensation is enabled, apply inverse trim gains to compensate for level differences
-        const bool masterCompEnabled = apvts.getRawParameterValue("MASTER_COMP")->load() > 0.5f;
-        if (masterCompEnabled)
+        // Step 2: Create AudioBuffer for OS domain processing and copy data from block
+        juce::AudioBuffer<SampleType> osBuffer(osNumChannels, osNumSamples);
+        for (int ch = 0; ch < osNumChannels; ++ch)
         {
-            const bool hcCompEnabled = apvts.getRawParameterValue("HC_COMP")->load() > 0.5f;
-            const bool scCompEnabled = apvts.getRawParameterValue("SC_COMP")->load() > 0.5f;
-            const bool slCompEnabled = apvts.getRawParameterValue("SL_COMP")->load() > 0.5f;
-            const bool flCompEnabled = apvts.getRawParameterValue("FL_COMP")->load() > 0.5f;
-
-            // Apply inverse trim gains (compensation)
-            if (hcCompEnabled && std::abs(hcTrimGain - static_cast<SampleType>(1.0)) > static_cast<SampleType>(1e-6))
-                tempBuffer1.applyGain(static_cast<SampleType>(1.0) / hcTrimGain);
-
-            if (scCompEnabled && std::abs(scTrimGain - static_cast<SampleType>(1.0)) > static_cast<SampleType>(1e-6))
-                tempBuffer2.applyGain(static_cast<SampleType>(1.0) / scTrimGain);
-
-            if (slCompEnabled && std::abs(slTrimGain - static_cast<SampleType>(1.0)) > static_cast<SampleType>(1e-6))
-                tempBuffer3.applyGain(static_cast<SampleType>(1.0) / slTrimGain);
-
-            if (flCompEnabled && std::abs(flTrimGain - static_cast<SampleType>(1.0)) > static_cast<SampleType>(1e-6))
-                tempBuffer4.applyGain(static_cast<SampleType>(1.0) / flTrimGain);
+            auto* blockData = osBlock.getChannelPointer(static_cast<size_t>(ch));
+            auto* bufferData = osBuffer.getWritePointer(ch);
+            for (int i = 0; i < osNumSamples; ++i)
+                bufferData[i] = blockData[i];
         }
 
-        // Blend the four paths using bi-linear interpolation
-        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
-        {
-            auto* dest = buffer.getWritePointer(ch);
-            const auto* src1 = tempBuffer1.getReadPointer(ch);
-            const auto* src2 = tempBuffer2.getReadPointer(ch);
-            const auto* src3 = tempBuffer3.getReadPointer(ch);
-            const auto* src4 = tempBuffer4.getReadPointer(ch);
+        // Step 3: Process XY blend in OS domain (all 4 paths + blending happens here)
+        // processXYBlend handles: trim gains, processing, gain comp, and blending
+        processXYBlend(osBuffer, osManager.getOsSampleRate());
 
-            for (int i = 0; i < numSamples; ++i)
-            {
-                dest[i] = wHC * src1[i] + wSC * src2[i] + wSL * src3[i] + wFL * src4[i];
-            }
+        // Step 4: Copy processed data back to osBlock
+        for (int ch = 0; ch < osNumChannels; ++ch)
+        {
+            const auto* bufferData = osBuffer.getReadPointer(ch);
+            auto* blockData = osBlock.getChannelPointer(static_cast<size_t>(ch));
+            for (int i = 0; i < osNumSamples; ++i)
+                blockData[i] = bufferData[i];
         }
+
+        // Step 5: Downsample back to base rate
+        osManager.downsampleBlock(buffer, osBlock);
     }
     // else: All processors muted - buffer contains gained input signal (pristine passthrough)
 
