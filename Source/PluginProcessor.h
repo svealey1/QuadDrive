@@ -235,6 +235,11 @@ private:
     // Architecture A: Global oversampling manager (replaces individual oversamplers above)
     OversamplingManager osManager;
 
+    // 4-channel oversampler for phase-coherent dry/wet processing in Modes 1/2
+    // Processes [wetL, wetR, dryL, dryR] together through identical filters
+    std::unique_ptr<juce::dsp::Oversampling<float>> oversamplingCombined4ChFloat;
+    std::unique_ptr<juce::dsp::Oversampling<double>> oversamplingCombined4ChDouble;
+
     int lookaheadSamples{0};
     int advancedTPLLookaheadSamples{0};      // Lookahead for advanced TPL (1-3ms)
     int protectionLookaheadSamples{0};           // No longer used (overshoot suppression is zero-latency)
