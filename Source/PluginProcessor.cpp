@@ -437,14 +437,10 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
     // Reset all processor states and allocate lookahead buffers (3ms for all)
     for (int ch = 0; ch < 2; ++ch)
     {
-        // Architecture A: Dry delay buffers sized for maximum latency
-        // Max latency = OS filter latency + XY lookahead (at base rate)
-        // Worst case is Linear Phase mode (16× OS has highest filter latency)
-        constexpr double xyProcessorLookaheadMs = 3.0;
-        const int maxOsFilterLatency = osManager.getLatencySamples();  // At base rate
-        const int xyLookaheadBaseSamples = static_cast<int>(std::ceil(sampleRate * xyProcessorLookaheadMs / 1000.0));
-        const int maxDryDelay = maxOsFilterLatency + xyLookaheadBaseSamples;
-        dryDelayState[ch].delayBuffer.resize(maxDryDelay, 0.0);
+        // Architecture A: Dry delay buffers NO LONGER NEEDED
+        // Dry and wet both pass through identical OS filters (perfect phase alignment)
+        // Keeping buffer structure for backwards compatibility (unused)
+        dryDelayState[ch].delayBuffer.clear();
         dryDelayState[ch].writePos = 0;
 
         // Hard Clip lookahead
@@ -729,12 +725,6 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     // Store input after gain for GR calculation
     const SampleType totalInputGain = normGain * inputGain;
 
-    // === STORE DRY SIGNAL (after normalization and input gain) ===
-    // CRITICAL: Dry signal must have same level as wet for time-aligned mixing
-    // NOTE: Dry is NOT processed through oversampling (would create timing mismatch)
-    // Instead, dry will be delayed by simple delay buffer to match total wet path latency
-    dryBuffer.makeCopyOf(buffer);
-
     // Calculate bi-linear blend weights from XY pad
     // XY Grid Layout: Top-Left=SL, Top-Right=HC, Bottom-Left=SC, Bottom-Right=FL
     // GUI sends: Y=1 for TOP, Y=0 for BOTTOM; X=0 for LEFT, X=1 for RIGHT
@@ -768,31 +758,37 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     }
 
     // === ARCHITECTURE A: GLOBAL OVERSAMPLING + XY BLEND PROCESSING ===
-    // Single upsample → process all 4 paths → blend → downsample
-    // This replaces the old per-processor oversampling approach
+    // CRITICAL: Dry signal must pass through SAME OS filters as wet for phase coherence
+    // Flow: Upsample both → process wet → downsample both → mix at base rate
+
+    // Step 1: Store dry signal (after gain, before processing)
+    dryBuffer.makeCopyOf(buffer);
+
+    // Step 2: Upsample wet signal to OS domain
+    auto wetOsBlock = osManager.upsampleBlock(buffer);
+    const int osNumSamples = static_cast<int>(wetOsBlock.getNumSamples());
+    const int osNumChannels = static_cast<int>(wetOsBlock.getNumChannels());
+
+    // Step 3: Upsample dry signal through SAME OS path (ensures identical phase)
+    auto dryOsBlock = osManager.upsampleBlock(dryBuffer);
+
+    // Step 4: Process wet in OS domain (if not muted)
     if (!allProcessorsMuted)
     {
-        // Step 1: Upsample to OS domain (1×, 8×, or 16× depending on mode)
-        auto osBlock = osManager.upsampleBlock(buffer);
-        const int osNumSamples = static_cast<int>(osBlock.getNumSamples());
-        const int osNumChannels = static_cast<int>(osBlock.getNumChannels());
-
-        // Step 2: Create non-owning AudioBuffer wrapper pointing to osBlock's memory
-        // CRITICAL: Must process osBlock in-place to preserve oversampler state
-        SampleType* channelPointers[2];
+        // Create non-owning AudioBuffer wrapper for wet processing
+        SampleType* wetChannelPointers[2];
         for (int ch = 0; ch < osNumChannels; ++ch)
-            channelPointers[ch] = osBlock.getChannelPointer(static_cast<size_t>(ch));
+            wetChannelPointers[ch] = wetOsBlock.getChannelPointer(static_cast<size_t>(ch));
 
-        juce::AudioBuffer<SampleType> osBuffer(channelPointers, osNumChannels, osNumSamples);
+        juce::AudioBuffer<SampleType> wetOsBuffer(wetChannelPointers, osNumChannels, osNumSamples);
 
-        // Step 3: Process XY blend in OS domain (modifies osBlock in-place)
-        // processXYBlend handles: trim gains, processing, gain comp, and blending
-        processXYBlend(osBuffer, osManager.getOsSampleRate());
-
-        // Step 4: Downsample back to base rate (reads from osBlock which we just modified)
-        osManager.downsampleBlock(buffer, osBlock);
+        // Process XY blend in OS domain (modifies wetOsBlock in-place)
+        processXYBlend(wetOsBuffer, osManager.getOsSampleRate());
     }
-    // else: All processors muted - buffer contains gained input signal (pristine passthrough)
+
+    // Step 5: Downsample both wet and dry (through identical OS filters)
+    osManager.downsampleBlock(buffer, wetOsBlock);      // Wet back to base rate
+    osManager.downsampleBlock(dryBuffer, dryOsBlock);   // Dry back to base rate
 
     // === PHASE DIFFERENCE LIMITER (DISABLED - Too audible) ===
     // Phase limiting on wet/dry deviation fundamentally changes nonlinear character
@@ -854,52 +850,11 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     }
     else
     {
-        // === DRY SIGNAL DELAY COMPENSATION (Architecture A) ===
-        // Dry signal delayed to match wet path latency for phase-aligned mixing
-        // Wet path latency = OS filter latency + XY processor lookahead (3ms)
-        int dryDelayAmount = 0;
-        if (processingMode == 0)
-        {
-            dryDelayAmount = 0;  // Zero Latency mode: no oversampling, no lookahead
-        }
-        else  // Mode 1 (Balanced 8×) or Mode 2 (Linear Phase 16×)
-        {
-            // OS filter latency (at base rate) from osManager
-            const int osFilterLatency = osManager.getLatencySamples();
+        // === ARCHITECTURE A: NO DELAY COMPENSATION NEEDED ===
+        // Dry and wet both pass through identical OS filters → perfect phase alignment
+        // No additional delay compensation required
 
-            // XY processor lookahead converted to base rate (3ms at base rate)
-            constexpr double xyProcessorLookaheadMs = 3.0;
-            const int xyLookaheadBaseSamples = static_cast<int>(std::ceil(currentSampleRate * xyProcessorLookaheadMs / 1000.0));
-
-            dryDelayAmount = osFilterLatency + xyLookaheadBaseSamples;
-        }
-
-        if (dryDelayAmount > 0)
-        {
-            for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
-            {
-                auto* dryData = dryBuffer.getWritePointer(ch);
-                auto& dryState = dryDelayState[ch];
-                auto& delayBuf = dryState.delayBuffer;
-                int& writePos = dryState.writePos;
-
-                for (int i = 0; i < numSamples; ++i)
-                {
-                    // Store current dry sample
-                    if (writePos >= 0 && writePos < static_cast<int>(delayBuf.size()))
-                        delayBuf[writePos] = static_cast<double>(dryData[i]);
-
-                    // Read delayed dry sample (matches total wet signal latency)
-                    int readPos = (writePos + 1) % dryDelayAmount;
-                    if (readPos >= 0 && readPos < static_cast<int>(delayBuf.size()))
-                        dryData[i] = static_cast<SampleType>(delayBuf[readPos]);
-
-                    writePos = (writePos + 1) % dryDelayAmount;
-                }
-            }
-        }
-
-        // Normal mode: Apply output gain and dry/wet mix
+        // Apply output gain and dry/wet mix
         buffer.applyGain(outputGain);
 
         // Dry/wet mix
