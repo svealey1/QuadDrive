@@ -235,10 +235,14 @@ private:
     // Architecture A: Global oversampling manager (replaces individual oversamplers above)
     OversamplingManager osManager;
 
-    // 4-channel oversampler for phase-coherent dry/wet processing in Modes 1/2
-    // Processes [wetL, wetR, dryL, dryR] together through identical filters
-    std::unique_ptr<juce::dsp::Oversampling<float>> oversamplingCombined4ChFloat;
-    std::unique_ptr<juce::dsp::Oversampling<double>> oversamplingCombined4ChDouble;
+    // 4-channel oversamplers for phase-coherent dry/wet processing
+    // Process [wetL, wetR, dryL, dryR] together through identical filters
+    // Balanced mode (8x)
+    std::unique_ptr<juce::dsp::Oversampling<float>> oversampling4ChBalancedFloat;
+    std::unique_ptr<juce::dsp::Oversampling<double>> oversampling4ChBalancedDouble;
+    // Linear Phase mode (16x)
+    std::unique_ptr<juce::dsp::Oversampling<float>> oversampling4ChLinearFloat;
+    std::unique_ptr<juce::dsp::Oversampling<double>> oversampling4ChLinearDouble;
 
     int lookaheadSamples{0};
     int advancedTPLLookaheadSamples{0};      // Lookahead for advanced TPL (1-3ms)
@@ -283,6 +287,7 @@ private:
     juce::AudioBuffer<float> tempBuffer2Float;
     juce::AudioBuffer<float> tempBuffer3Float;
     juce::AudioBuffer<float> tempBuffer4Float;
+    juce::AudioBuffer<float> combined4ChFloat;  // For phase-coherent dry/wet processing
 
     // Buffers for parallel processing (double)
     juce::AudioBuffer<double> dryBufferDouble;
@@ -290,6 +295,7 @@ private:
     juce::AudioBuffer<double> tempBuffer2Double;
     juce::AudioBuffer<double> tempBuffer3Double;
     juce::AudioBuffer<double> tempBuffer4Double;
+    juce::AudioBuffer<double> combined4ChDouble;  // For phase-coherent dry/wet processing
 
     // Normalization state variables (use double precision for peak detection)
     double peakInputLevel{0.0};
