@@ -1207,7 +1207,7 @@ void QuadBlendDriveAudioProcessorEditor::resized()
                                   processingModeComboWidth,
                                   static_cast<int>(28 * scale));
 
-    centerSection.removeFromTop(static_cast<int>(12 * scale));  // Gap below mode selector
+    centerSection.removeFromTop(static_cast<int>(12 * scale));  // Gap below Processing Mode selector
 
     // Make XY Pad SQUARE - use the smaller dimension
     int availableHeight = centerSection.getHeight();
