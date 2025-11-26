@@ -299,6 +299,12 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
         osmCompensationState[ch].delayBuffer.resize(advancedTPLLookaheadSamples, 0.0);
         osmCompensationState[ch].writePos = 0;
 
+        // Initialize dry delay buffer for parallel processing (OS rate)
+        // v1.7.6: Delay applied in OS domain for 4-channel sync processing
+        // Use maximum OS rate lookahead samples for buffer sizing
+        dryDelayState[ch].delayBuffer.resize(maxLookaheadSamples, 0.0);
+        dryDelayState[ch].writePos = 0;
+
         // Design multiband filters for IRC at OS rate
         const double pi = juce::MathConstants<double>::pi;
         const double fs = osSampleRate;  // Oversampled rate (1×, 8×, or 16×)
@@ -776,6 +782,11 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
             std::fill(softClipState[ch].lookaheadBuffer.begin(), softClipState[ch].lookaheadBuffer.end(), 0.0);
             std::fill(slowLimiterState[ch].lookaheadBuffer.begin(), slowLimiterState[ch].lookaheadBuffer.end(), 0.0);
             std::fill(fastLimiterState[ch].lookaheadBuffer.begin(), fastLimiterState[ch].lookaheadBuffer.end(), 0.0);
+
+            // Resize and clear dry delay buffer for new mode (at OS rate)
+            // v1.7.6: Delay in OS domain, so use OS-rate lookahead samples
+            dryDelayState[ch].delayBuffer.resize(lookaheadSamples, 0.0);
+            dryDelayState[ch].writePos = 0;
         }
     }
 
@@ -793,8 +804,18 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
         }
     }
 
+    // === SIGNAL FLOW (v1.7.4) ===
+    // 1. Normalization applied to buffer (both dry and wet get this)
+    // 2. Dry tapped (has normalization, NO input gain)
+    // 3. Input gain applied to buffer (wet only - for drive)
+    // 4. Buffer processed through OS + XY blend (wet path)
+    // 5. Inverse gain applied to wet (if master comp enabled - keeps output level constant)
+    // 6. Output gain applied to wet
+    // 7. Dry/wet mix
+    // Result: Adjusting input gain changes drive amount without changing output level (when master comp on)
+
     // === INPUT NORMALIZATION ===
-    // Apply normalization gain if enabled
+    // Apply normalization gain FIRST (before everything else)
     SampleType normGain = static_cast<SampleType>(1.0);
     if (normalizationEnabled)
     {
@@ -802,10 +823,19 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
         buffer.applyGain(normGain);
     }
 
-    // Apply manual input gain (trim)
+    // === CAPTURE DRY SIGNAL (After normalization, BEFORE input gain) ===
+    // Dry = normalization only, NO input gain
+    auto& originalInputBuffer = (std::is_same<SampleType, float>::value)
+        ? reinterpret_cast<juce::AudioBuffer<SampleType>&>(originalInputBufferFloat)
+        : reinterpret_cast<juce::AudioBuffer<SampleType>&>(originalInputBufferDouble);
+
+    originalInputBuffer.makeCopyOf(buffer);
+
+    // === INPUT GAIN (Wet path only - drives saturation) ===
+    // Apply manual input gain to WET signal only
     buffer.applyGain(inputGain);
 
-    // Store input after gain for GR calculation
+    // Store total input gain for GR calculation
     const SampleType totalInputGain = normGain * inputGain;
 
     // Calculate bi-linear blend weights from XY pad
@@ -841,16 +871,17 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     }
 
     // === ARCHITECTURE A: GLOBAL OVERSAMPLING + XY BLEND PROCESSING ===
-    // MODE 0 (Zero Latency): Both dry and wet bypass OS
-    // MODES 1/2 (Balanced/Linear): Both dry and wet pass through OS for phase coherence
+    // v1.7.6: Both wet and dry MUST go through OS together for phase coherence
+    // Problem: Calling oversampler twice (wet, then dry) causes phase misalignment
+    // Solution: 4-channel processing [wetL, wetR, dryL, dryR] through same OS call
 
-    // Step 1: Store dry signal
-    dryBuffer.makeCopyOf(buffer);
+    // Store pristine dry (no gains, no processing)
+    dryBuffer.makeCopyOf(originalInputBuffer);
 
     if (processingMode == 0)
     {
-        // MODE 0: Zero Latency - neither dry nor wet use oversampling
-        auto osBlock = osManager.upsampleBlock(buffer);  // Returns buffer itself (no OS)
+        // MODE 0: No oversampling needed
+        auto osBlock = osManager.upsampleBlock(buffer);
         const int osNumSamples = static_cast<int>(osBlock.getNumSamples());
         const int osNumChannels = static_cast<int>(osBlock.getNumChannels());
 
@@ -864,60 +895,91 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
             processXYBlend(osBuffer, osManager.getOsSampleRate());
         }
 
-        osManager.downsampleBlock(buffer, osBlock);  // No-op in Mode 0
+        osManager.downsampleBlock(buffer, osBlock);
+        // Dry already pristine, no processing needed
     }
     else
     {
-        // MODES 1/2: Phase-coherent dry/wet mixing
-        // KEY INSIGHT: Mix in the OVERSAMPLED domain so both dry and wet pass through
-        // the SAME upsample and downsample filters
+        // MODES 1/2: 4-channel synchronized OS processing for phase coherence
+        // Both dry and wet through SAME oversampler call
 
-        // Upsample input once
-        auto osBlock = osManager.upsampleBlock(buffer);
-        const int osNumSamples = static_cast<int>(osBlock.getNumSamples());
-        const int osNumChannels = static_cast<int>(osBlock.getNumChannels());
-
-        // Create buffer wrappers for OS domain
-        SampleType* channelPointers[2];
-        for (int ch = 0; ch < osNumChannels; ++ch)
-            channelPointers[ch] = osBlock.getChannelPointer(static_cast<size_t>(ch));
-
-        juce::AudioBuffer<SampleType> osBuffer(channelPointers, osNumChannels, osNumSamples);
-
-        // Save dry signal in OS domain (before processing)
-        auto& tempBuffer1 = (std::is_same<SampleType, float>::value)
-            ? reinterpret_cast<juce::AudioBuffer<SampleType>&>(tempBuffer1Float)
-            : reinterpret_cast<juce::AudioBuffer<SampleType>&>(tempBuffer1Double);
-
-        tempBuffer1.setSize(osNumChannels, osNumSamples, false, false, true);
-        tempBuffer1.makeCopyOf(osBuffer);
-
-        // Process wet signal in OS domain
-        if (!allProcessorsMuted)
+        // Get 4-channel oversampler
+        juce::dsp::Oversampling<SampleType>* oversampler4Ch = nullptr;
+        if (std::is_same<SampleType, float>::value)
         {
-            processXYBlend(osBuffer, osManager.getOsSampleRate());
+            oversampler4Ch = processingMode == 1
+                ? reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversampling4ChBalancedFloat.get())
+                : reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversampling4ChLinearFloat.get());
+        }
+        else
+        {
+            oversampler4Ch = processingMode == 1
+                ? reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversampling4ChBalancedDouble.get())
+                : reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversampling4ChLinearDouble.get());
         }
 
-        // Mix dry and wet in OS domain (both have gone through upsample filters)
-        const SampleType wetGain = mixWetPercent / static_cast<SampleType>(100.0);
-        const SampleType dryGain = static_cast<SampleType>(1.0) - wetGain;
+        // Create 4-channel buffer: [wetL, wetR, dryL, dryR]
+        auto& combined4Ch = (std::is_same<SampleType, float>::value)
+            ? reinterpret_cast<juce::AudioBuffer<SampleType>&>(combined4ChFloat)
+            : reinterpret_cast<juce::AudioBuffer<SampleType>&>(combined4ChDouble);
 
-        for (int ch = 0; ch < osNumChannels; ++ch)
+        combined4Ch.setSize(4, numSamples, false, false, true);
+        for (int ch = 0; ch < 2; ++ch)
         {
-            auto* mixedData = osBuffer.getWritePointer(ch);
-            const auto* dryData = tempBuffer1.getReadPointer(ch);
+            combined4Ch.copyFrom(ch, 0, buffer, ch, 0, numSamples);           // Wet (0-1)
+            combined4Ch.copyFrom(ch + 2, 0, dryBuffer, ch, 0, numSamples);    // Dry (2-3)
+        }
 
-            for (int i = 0; i < osNumSamples; ++i)
+        // Upsample all 4 channels together (phase-coherent OS filtering)
+        juce::dsp::AudioBlock<SampleType> combined4ChBlock(combined4Ch);
+        auto osBlock4Ch = oversampler4Ch->processSamplesUp(combined4ChBlock);
+        const int osNumSamples = static_cast<int>(osBlock4Ch.getNumSamples());
+
+        // Process ONLY wet channels (0-1) with XY blend (has lookahead)
+        if (!allProcessorsMuted)
+        {
+            SampleType* wetPointers[2] = {
+                osBlock4Ch.getChannelPointer(0),
+                osBlock4Ch.getChannelPointer(1)
+            };
+            juce::AudioBuffer<SampleType> wetBuffer(wetPointers, 2, osNumSamples);
+            processXYBlend(wetBuffer, oversampler4Ch->getOversamplingFactor() * currentSampleRate);
+        }
+
+        // Delay dry channels (2-3) in OS domain to match wet's XY lookahead
+        const int osLookahead = lookaheadSamples;  // Already at OS rate
+        if (osLookahead > 0)
+        {
+            for (int ch = 0; ch < 2; ++ch)
             {
-                mixedData[i] = wetGain * mixedData[i] + dryGain * dryData[i];
+                auto& delayState = dryDelayState[ch];
+                auto* dryData = osBlock4Ch.getChannelPointer(static_cast<size_t>(ch + 2));
+
+                for (int i = 0; i < osNumSamples; ++i)
+                {
+                    const double delayed = delayState.delayBuffer[delayState.writePos];
+                    delayState.delayBuffer[delayState.writePos] = static_cast<double>(dryData[i]);
+                    delayState.writePos = (delayState.writePos + 1) % osLookahead;
+                    dryData[i] = static_cast<SampleType>(delayed);
+                }
             }
         }
 
-        // Downsample the mixed result
-        osManager.downsampleBlock(buffer, osBlock);
+        // Downsample all 4 channels together (phase-coherent)
+        auto& tempBuffer2 = (std::is_same<SampleType, float>::value)
+            ? reinterpret_cast<juce::AudioBuffer<SampleType>&>(tempBuffer2Float)
+            : reinterpret_cast<juce::AudioBuffer<SampleType>&>(tempBuffer2Double);
 
-        // Copy to dryBuffer for later use (already mixed, so copy the same result)
-        dryBuffer.makeCopyOf(buffer);
+        tempBuffer2.setSize(4, numSamples, false, false, true);
+        juce::dsp::AudioBlock<SampleType> downBlock(tempBuffer2);
+        oversampler4Ch->processSamplesDown(downBlock);
+
+        // Extract wet and dry (now perfectly phase-coherent)
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            buffer.copyFrom(ch, 0, tempBuffer2, ch, 0, numSamples);         // Wet: 0-1
+            dryBuffer.copyFrom(ch, 0, tempBuffer2, ch + 2, 0, numSamples);  // Dry: 2-3
+        }
     }
 
     // === PHASE DIFFERENCE LIMITER (DISABLED - Too audible) ===
@@ -935,6 +997,8 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     // This happens BEFORE delta mode and output gain are applied
 
     // Calculate gain reduction for visualization
+    // Note: Dry has normalization only, wet has normalization + input gain + processing
+    // GR meter compares wet output vs. what the input would be with input gain applied
     SampleType maxInputLevel = static_cast<SampleType>(0.0);
     SampleType maxOutputLevel = static_cast<SampleType>(0.0);
     for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
@@ -944,7 +1008,8 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
 
         for (int i = 0; i < numSamples; ++i)
         {
-            maxInputLevel = juce::jmax(maxInputLevel, std::abs(dry[i] * totalInputGain));
+            // Dry has normalization only, so multiply by input gain to get theoretical input
+            maxInputLevel = juce::jmax(maxInputLevel, std::abs(dry[i] * inputGain));
             maxOutputLevel = juce::jmax(maxOutputLevel, std::abs(wet[i]));
         }
     }
@@ -972,7 +1037,8 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
             for (int i = 0; i < numSamples; ++i)
             {
                 // Calculate pure gain reduction signal: what was removed by processing
-                SampleType inputGained = input[i] * totalInputGain;
+                // Dry has normalization only, so apply input gain to get theoretical input
+                SampleType inputGained = input[i] * inputGain;
                 SampleType grSignal = inputGained - output[i];
                 output[i] = grSignal;  // Output ONLY the difference (artifacts removed)
             }
@@ -980,12 +1046,20 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     }
     else
     {
-        // === ARCHITECTURE A: DELAY COMPENSATION APPLIED ===
-        // Dry stored before OS (no filtering in Zero Latency mode)
-        // Delay compensation applied above matches wet path latency in Modes 1/2
-        // Tradeoff: Slight phase mismatch vs zero filtering in Mode 0
+        // === PARALLEL PROCESSING: DRY/WET MIX ===
+        // Dry: pristine input (with normalization only), delayed to match wet latency
+        // Wet: normalization + input gain + processing + inverse gain (if master comp) + output gain
+        // Both time-aligned → zero phase shift → no comb filtering
 
-        // Apply output gain and dry/wet mix
+        // Apply inverse input gain to wet if master compensation enabled
+        // This keeps output level constant as input gain (drive) is adjusted
+        const bool masterCompEnabled = apvts.getRawParameterValue("MASTER_COMP")->load() > 0.5f;
+        if (masterCompEnabled && std::abs(inputGain - static_cast<SampleType>(1.0)) > static_cast<SampleType>(1e-6))
+        {
+            buffer.applyGain(static_cast<SampleType>(1.0) / inputGain);
+        }
+
+        // Apply output gain to wet BEFORE mixing
         buffer.applyGain(outputGain);
 
         // Dry/wet mix
@@ -998,6 +1072,7 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
 
                 for (int i = 0; i < numSamples; ++i)
                 {
+                    // Dry is pristine (no gains), wet has all gains + processing
                     wet[i] = dry[i] * (static_cast<SampleType>(1.0) - mixWet) + wet[i] * mixWet;
                 }
             }
@@ -2238,8 +2313,37 @@ void QuadBlendDriveAudioProcessor::savePreset(int slot)
     if (slot < 0 || slot >= 4)
         return;
 
-    // Copy current APVTS state to preset slot
-    presetSlots[slot] = apvts.copyState();
+    // Copy current APVTS state, excluding certain parameters
+    auto fullState = apvts.copyState();
+
+    // Exclude these parameters from presets (they are global/session settings):
+    // - BYPASS: Plugin bypass state
+    // - MASTER_COMP: Gain compensation setting
+    // - DELTA_MODE, OVERSHOOT_DELTA_MODE, TRUE_PEAK_DELTA_MODE: Delta modes (diagnostic)
+    static const juce::StringArray excludedParams = {
+        "BYPASS",
+        "MASTER_COMP",
+        "DELTA_MODE",
+        "OVERSHOOT_DELTA_MODE",
+        "TRUE_PEAK_DELTA_MODE"
+    };
+
+    // Remove excluded parameters from the state
+    auto state = fullState.createCopy();
+    for (const auto& paramID : excludedParams)
+    {
+        for (int i = 0; i < state.getNumChildren(); ++i)
+        {
+            auto child = state.getChild(i);
+            if (child.hasProperty("id") && child.getProperty("id").toString() == paramID)
+            {
+                state.removeChild(i, nullptr);
+                break;
+            }
+        }
+    }
+
+    presetSlots[slot] = state;
 }
 
 void QuadBlendDriveAudioProcessor::recallPreset(int slot)
@@ -2251,8 +2355,27 @@ void QuadBlendDriveAudioProcessor::recallPreset(int slot)
     if (!presetSlots[slot].isValid())
         return;
 
+    // Save current values of excluded parameters
+    const float currentBypass = apvts.getRawParameterValue("BYPASS")->load();
+    const float currentMasterComp = apvts.getRawParameterValue("MASTER_COMP")->load();
+    const float currentDeltaMode = apvts.getRawParameterValue("DELTA_MODE")->load();
+    const float currentOSDelta = apvts.getRawParameterValue("OVERSHOOT_DELTA_MODE")->load();
+    const float currentTPDelta = apvts.getRawParameterValue("TRUE_PEAK_DELTA_MODE")->load();
+
     // Restore preset state to APVTS
     apvts.replaceState(presetSlots[slot].createCopy());
+
+    // Restore excluded parameter values
+    if (auto* param = apvts.getParameter("BYPASS"))
+        param->setValueNotifyingHost(currentBypass);
+    if (auto* param = apvts.getParameter("MASTER_COMP"))
+        param->setValueNotifyingHost(currentMasterComp);
+    if (auto* param = apvts.getParameter("DELTA_MODE"))
+        param->setValueNotifyingHost(currentDeltaMode);
+    if (auto* param = apvts.getParameter("OVERSHOOT_DELTA_MODE"))
+        param->setValueNotifyingHost(currentOSDelta);
+    if (auto* param = apvts.getParameter("TRUE_PEAK_DELTA_MODE"))
+        param->setValueNotifyingHost(currentTPDelta);
 }
 
 bool QuadBlendDriveAudioProcessor::hasPreset(int slot) const

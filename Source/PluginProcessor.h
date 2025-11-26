@@ -288,6 +288,7 @@ private:
     juce::AudioBuffer<float> tempBuffer3Float;
     juce::AudioBuffer<float> tempBuffer4Float;
     juce::AudioBuffer<float> combined4ChFloat;  // For phase-coherent dry/wet processing
+    juce::AudioBuffer<float> originalInputBufferFloat;  // Pristine input before any gains
 
     // Buffers for parallel processing (double)
     juce::AudioBuffer<double> dryBufferDouble;
@@ -296,6 +297,7 @@ private:
     juce::AudioBuffer<double> tempBuffer3Double;
     juce::AudioBuffer<double> tempBuffer4Double;
     juce::AudioBuffer<double> combined4ChDouble;  // For phase-coherent dry/wet processing
+    juce::AudioBuffer<double> originalInputBufferDouble;  // Pristine input before any gains
 
     // Normalization state variables (use double precision for peak detection)
     double peakInputLevel{0.0};
