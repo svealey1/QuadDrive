@@ -219,30 +219,33 @@ private:
     };
     OSMCompensationState osmCompensationState[2];  // Per channel
 
-    // Three oversampling types for three processing modes (8x oversampling)
-    // Zero Latency: Polyphase IIR (minimum-phase, ~0 latency)
-    std::unique_ptr<juce::dsp::Oversampling<float>> oversamplingZeroLatencyFloat;
-    std::unique_ptr<juce::dsp::Oversampling<double>> oversamplingZeroLatencyDouble;
-
-    // Balanced: Halfband Equiripple FIR (~32 samples latency)
-    std::unique_ptr<juce::dsp::Oversampling<float>> oversamplingBalancedFloat;
-    std::unique_ptr<juce::dsp::Oversampling<double>> oversamplingBalancedDouble;
-
-    // Linear Phase: High-order FIR (~128 samples latency, perfect reconstruction)
-    std::unique_ptr<juce::dsp::Oversampling<float>> oversamplingLinearPhaseFloat;
-    std::unique_ptr<juce::dsp::Oversampling<double>> oversamplingLinearPhaseDouble;
-
-    // Architecture A: Global oversampling manager (replaces individual oversamplers above)
+    // Architecture A: Global oversampling manager (handles ALL 2-channel oversampling)
     OversamplingManager osManager;
 
     // 4-channel oversamplers for phase-coherent dry/wet processing
     // Process [wetL, wetR, dryL, dryR] together through identical filters
-    // Balanced mode (8x)
+    // Balanced mode (8×)
     std::unique_ptr<juce::dsp::Oversampling<float>> oversampling4ChBalancedFloat;
     std::unique_ptr<juce::dsp::Oversampling<double>> oversampling4ChBalancedDouble;
-    // Linear Phase mode (16x)
+    // Linear Phase mode (16×)
     std::unique_ptr<juce::dsp::Oversampling<float>> oversampling4ChLinearFloat;
     std::unique_ptr<juce::dsp::Oversampling<double>> oversampling4ChLinearDouble;
+
+    // Delta mode 4-channel oversampler (for overshoot suppression delta mode)
+    // Uses 8× oversampling for [mainL, mainR, refL, refR] phase-coherent processing
+    std::unique_ptr<juce::dsp::Oversampling<float>> oversampling4ChDeltaFloat;
+    std::unique_ptr<juce::dsp::Oversampling<double>> oversampling4ChDeltaDouble;
+    // Delta mode 16× oversampler (for Linear Phase mode overshoot delta)
+    std::unique_ptr<juce::dsp::Oversampling<float>> oversampling4ChDelta16xFloat;
+    std::unique_ptr<juce::dsp::Oversampling<double>> oversampling4ChDelta16xDouble;
+
+    // 2-channel oversamplers for protection limiters (overshoot suppression, advanced TPL)
+    // Balanced mode (8×)
+    std::unique_ptr<juce::dsp::Oversampling<float>> oversampling2ChBalancedFloat;
+    std::unique_ptr<juce::dsp::Oversampling<double>> oversampling2ChBalancedDouble;
+    // Linear Phase mode (16×)
+    std::unique_ptr<juce::dsp::Oversampling<float>> oversampling2ChLinearFloat;
+    std::unique_ptr<juce::dsp::Oversampling<double>> oversampling2ChLinearDouble;
 
     int lookaheadSamples{0};
     int advancedTPLLookaheadSamples{0};      // Lookahead for advanced TPL (1-3ms)
@@ -281,6 +284,11 @@ private:
     };
     OscilloscopeBandFilters oscFilters[2];  // Per channel
 
+    // Parameter smoothing (prevents zipper noise during automation)
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> smoothedInputGain;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> smoothedOutputGain;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedMixWet;
+
     // Buffers for parallel processing (float)
     juce::AudioBuffer<float> dryBufferFloat;
     juce::AudioBuffer<float> tempBuffer1Float;
@@ -289,6 +297,7 @@ private:
     juce::AudioBuffer<float> tempBuffer4Float;
     juce::AudioBuffer<float> combined4ChFloat;  // For phase-coherent dry/wet processing
     juce::AudioBuffer<float> originalInputBufferFloat;  // Pristine input before any gains
+    juce::AudioBuffer<float> protectionDeltaCombined4ChFloat;  // Pre-allocated for overshoot delta mode
 
     // Buffers for parallel processing (double)
     juce::AudioBuffer<double> dryBufferDouble;
@@ -298,6 +307,7 @@ private:
     juce::AudioBuffer<double> tempBuffer4Double;
     juce::AudioBuffer<double> combined4ChDouble;  // For phase-coherent dry/wet processing
     juce::AudioBuffer<double> originalInputBufferDouble;  // Pristine input before any gains
+    juce::AudioBuffer<double> protectionDeltaCombined4ChDouble;  // Pre-allocated for overshoot delta mode
 
     // Normalization state variables (use double precision for peak detection)
     double peakInputLevel{0.0};

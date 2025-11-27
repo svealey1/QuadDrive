@@ -195,53 +195,6 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
     // Mode 2: 16× OS (multiplier = 16)
     osManager.prepare(sampleRate, samplesPerBlock, processingMode);
 
-    // ===== TEMPORARY: Old oversampling objects for processBlockInternal =====
-    // TODO: Remove in Phase 3 when processBlockInternal is refactored
-    // Initialize ALL three types (old code initialized all, not just current mode)
-    constexpr size_t oversamplingFactor = 3;  // 2^3 = 8× oversampling
-    constexpr size_t numChannels = 2;
-
-    // MODE 0: Zero Latency (Minimum-Phase Polyphase IIR)
-    oversamplingZeroLatencyFloat = std::make_unique<juce::dsp::Oversampling<float>>(
-        numChannels, oversamplingFactor,
-        juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR,
-        false, false);  // No steep filter, no normalization (minimum-phase)
-
-    oversamplingZeroLatencyDouble = std::make_unique<juce::dsp::Oversampling<double>>(
-        numChannels, oversamplingFactor,
-        juce::dsp::Oversampling<double>::filterHalfBandPolyphaseIIR,
-        false, false);
-
-    // MODE 1: Balanced (Halfband Equiripple FIR)
-    oversamplingBalancedFloat = std::make_unique<juce::dsp::Oversampling<float>>(
-        numChannels, oversamplingFactor,
-        juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple,
-        true, false);  // Steep, no normalization
-
-    oversamplingBalancedDouble = std::make_unique<juce::dsp::Oversampling<double>>(
-        numChannels, oversamplingFactor,
-        juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple,
-        true, false);
-
-    // MODE 2: Linear Phase (High-Order FIR with normalization)
-    oversamplingLinearPhaseFloat = std::make_unique<juce::dsp::Oversampling<float>>(
-        numChannels, oversamplingFactor,
-        juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple,
-        true, true);  // Steep + normalization for maximum quality
-
-    oversamplingLinearPhaseDouble = std::make_unique<juce::dsp::Oversampling<double>>(
-        numChannels, oversamplingFactor,
-        juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple,
-        true, true);
-
-    // Initialize all oversampling objects
-    oversamplingZeroLatencyFloat->initProcessing(static_cast<size_t>(samplesPerBlock));
-    oversamplingZeroLatencyDouble->initProcessing(static_cast<size_t>(samplesPerBlock));
-    oversamplingBalancedFloat->initProcessing(static_cast<size_t>(samplesPerBlock));
-    oversamplingBalancedDouble->initProcessing(static_cast<size_t>(samplesPerBlock));
-    oversamplingLinearPhaseFloat->initProcessing(static_cast<size_t>(samplesPerBlock));
-    oversamplingLinearPhaseDouble->initProcessing(static_cast<size_t>(samplesPerBlock));
-
     // Get OS sample rate for all processor calculations
     const double osSampleRate = osManager.getOsSampleRate();
     const int osMultiplier = osManager.getOsMultiplier();
@@ -451,6 +404,7 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
     tempBuffer3Float.setSize(2, samplesPerBlock);
     tempBuffer4Float.setSize(2, samplesPerBlock);
     combined4ChFloat.setSize(4, samplesPerBlock);  // 4-channel for phase-coherent processing
+    protectionDeltaCombined4ChFloat.setSize(4, samplesPerBlock);  // Pre-allocated for overshoot delta mode
 
     // Allocate double buffers
     dryBufferDouble.setSize(2, samplesPerBlock);
@@ -459,6 +413,7 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
     tempBuffer3Double.setSize(2, samplesPerBlock);
     tempBuffer4Double.setSize(2, samplesPerBlock);
     combined4ChDouble.setSize(4, samplesPerBlock);  // 4-channel for phase-coherent processing
+    protectionDeltaCombined4ChDouble.setSize(4, samplesPerBlock);  // Pre-allocated for overshoot delta mode
 
     // Initialize ALL 4-channel oversamplers for phase-coherent dry/wet processing
     // Pre-allocate for all modes to allow hot-swapping without audio thread allocation
@@ -479,6 +434,71 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
         4, 4, juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple, true, true);
     oversampling4ChLinearFloat->initProcessing(static_cast<size_t>(samplesPerBlock));
     oversampling4ChLinearDouble->initProcessing(static_cast<size_t>(samplesPerBlock));
+
+    // Delta mode (8x OS) - For overshoot suppression delta mode in Balanced mode
+    // Pre-allocate to avoid audio thread allocation when delta mode is enabled
+    // Uses 4 channels: [mainL, mainR, refL, refR] for phase-coherent processing
+    oversampling4ChDeltaFloat = std::make_unique<juce::dsp::Oversampling<float>>(
+        4, 3, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true, false);
+    oversampling4ChDeltaDouble = std::make_unique<juce::dsp::Oversampling<double>>(
+        4, 3, juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple, true, false);
+    oversampling4ChDeltaFloat->initProcessing(static_cast<size_t>(samplesPerBlock));
+    oversampling4ChDeltaDouble->initProcessing(static_cast<size_t>(samplesPerBlock));
+
+    // Delta mode (16x OS) - For overshoot suppression delta mode in Linear Phase mode
+    oversampling4ChDelta16xFloat = std::make_unique<juce::dsp::Oversampling<float>>(
+        4, 4, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true, true);
+    oversampling4ChDelta16xDouble = std::make_unique<juce::dsp::Oversampling<double>>(
+        4, 4, juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple, true, true);
+    oversampling4ChDelta16xFloat->initProcessing(static_cast<size_t>(samplesPerBlock));
+    oversampling4ChDelta16xDouble->initProcessing(static_cast<size_t>(samplesPerBlock));
+
+    // 2-channel oversamplers for protection limiters (overshoot suppression, advanced TPL)
+    // Balanced mode (8x OS) - matches osManager Mode 1
+    oversampling2ChBalancedFloat = std::make_unique<juce::dsp::Oversampling<float>>(
+        2, 3, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, false, false);
+    oversampling2ChBalancedDouble = std::make_unique<juce::dsp::Oversampling<double>>(
+        2, 3, juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple, false, false);
+    oversampling2ChBalancedFloat->initProcessing(static_cast<size_t>(samplesPerBlock));
+    oversampling2ChBalancedDouble->initProcessing(static_cast<size_t>(samplesPerBlock));
+
+    // Linear Phase mode (16x OS) - matches osManager Mode 2
+    oversampling2ChLinearFloat = std::make_unique<juce::dsp::Oversampling<float>>(
+        2, 4, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true, true);
+    oversampling2ChLinearDouble = std::make_unique<juce::dsp::Oversampling<double>>(
+        2, 4, juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple, true, true);
+    oversampling2ChLinearFloat->initProcessing(static_cast<size_t>(samplesPerBlock));
+    oversampling2ChLinearDouble->initProcessing(static_cast<size_t>(samplesPerBlock));
+
+    // Initialize parameter smoothers (20ms ramp time to prevent zipper noise)
+    const double rampTimeSeconds = 0.020;  // 20ms
+    smoothedInputGain.reset(sampleRate, rampTimeSeconds);
+    smoothedOutputGain.reset(sampleRate, rampTimeSeconds);
+    smoothedMixWet.reset(sampleRate, rampTimeSeconds);
+
+    // Set initial values from current parameter state (not arbitrary defaults)
+    float inputGainDB = apvts.getRawParameterValue("INPUT_GAIN")->load();
+    float outputGainDB = apvts.getRawParameterValue("OUTPUT_GAIN")->load();
+    float currentInputGain = juce::Decibels::decibelsToGain(inputGainDB);
+    float currentOutputGain = juce::Decibels::decibelsToGain(outputGainDB);
+    float currentMix = apvts.getRawParameterValue("MIX_WET")->load() / 100.0f;
+
+    // Quantize gains to exactly 1.0 when near 0 dB (unity gain)
+    constexpr float unityThresholdDB = 0.05f;  // ±0.05 dB
+    if (std::abs(inputGainDB) < unityThresholdDB)
+        currentInputGain = 1.0f;
+    if (std::abs(outputGainDB) < unityThresholdDB)
+        currentOutputGain = 1.0f;
+
+    // Quantize mix at extremes (ensures smoothing can reach exact 0/1)
+    if (currentMix < 0.005f)
+        currentMix = 0.0f;
+    else if (currentMix > 0.995f)
+        currentMix = 1.0f;
+
+    smoothedInputGain.setCurrentAndTargetValue(currentInputGain);
+    smoothedOutputGain.setCurrentAndTargetValue(currentOutputGain);
+    smoothedMixWet.setCurrentAndTargetValue(currentMix);
 
     // Reset all processor states and allocate lookahead buffers (3ms for all)
     for (int ch = 0; ch < 2; ++ch)
@@ -521,6 +541,26 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
 
 void QuadBlendDriveAudioProcessor::releaseResources()
 {
+    // Reset main oversampling manager
+    osManager.reset();
+
+    // Reset 4-channel dry/wet oversamplers
+    if (oversampling4ChBalancedFloat) oversampling4ChBalancedFloat->reset();
+    if (oversampling4ChBalancedDouble) oversampling4ChBalancedDouble->reset();
+    if (oversampling4ChLinearFloat) oversampling4ChLinearFloat->reset();
+    if (oversampling4ChLinearDouble) oversampling4ChLinearDouble->reset();
+
+    // Reset delta mode oversamplers
+    if (oversampling4ChDeltaFloat) oversampling4ChDeltaFloat->reset();
+    if (oversampling4ChDeltaDouble) oversampling4ChDeltaDouble->reset();
+    if (oversampling4ChDelta16xFloat) oversampling4ChDelta16xFloat->reset();
+    if (oversampling4ChDelta16xDouble) oversampling4ChDelta16xDouble->reset();
+
+    // Reset protection stage oversamplers
+    if (oversampling2ChBalancedFloat) oversampling2ChBalancedFloat->reset();
+    if (oversampling2ChBalancedDouble) oversampling2ChBalancedDouble->reset();
+    if (oversampling2ChLinearFloat) oversampling2ChLinearFloat->reset();
+    if (oversampling2ChLinearDouble) oversampling2ChLinearDouble->reset();
 }
 
 //==============================================================================
@@ -729,24 +769,46 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     const bool deltaMode = apvts.getRawParameterValue("DELTA_MODE")->load() > 0.5f;
 
     const SampleType threshold = juce::Decibels::decibelsToGain(thresholdDB);
-    const SampleType inputGain = juce::Decibels::decibelsToGain(inputGainDB);
-    const SampleType outputGain = juce::Decibels::decibelsToGain(outputGainDB);
-    const SampleType mixWet = mixWetPercent / static_cast<SampleType>(100.0);
+    SampleType inputGain = juce::Decibels::decibelsToGain(inputGainDB);
+    SampleType outputGain = juce::Decibels::decibelsToGain(outputGainDB);
+    SampleType mixWet = mixWetPercent / static_cast<SampleType>(100.0);
     const SampleType scKnee = scKneePercent / static_cast<SampleType>(100.0);
+
+    // Quantize gains to exactly 1.0 when near 0 dB (unity gain)
+    // Prevents parameter smoothing from asymptotically approaching but never reaching unity
+    // This is critical for null tests and bit-perfect passthrough at unity gain
+    constexpr SampleType unityThresholdDB = static_cast<SampleType>(0.05);  // ±0.05 dB
+    if (std::abs(inputGainDB) < unityThresholdDB)
+        inputGain = static_cast<SampleType>(1.0);
+    if (std::abs(outputGainDB) < unityThresholdDB)
+        outputGain = static_cast<SampleType>(1.0);
+
+    // Quantize mix parameter at extremes (ensures smoothing reaches exact 0/1)
+    // Prevents asymptotic approach causing wet signal bleed at "0%" mix
+    if (mixWet < static_cast<SampleType>(0.005))  // < 0.5%
+        mixWet = static_cast<SampleType>(0.0);
+    else if (mixWet > static_cast<SampleType>(0.995))  // > 99.5%
+        mixWet = static_cast<SampleType>(1.0);
+
+    // Update parameter smoother targets (smooth over 20ms to prevent zipper noise)
+    smoothedInputGain.setTargetValue(static_cast<float>(inputGain));
+    smoothedOutputGain.setTargetValue(static_cast<float>(outputGain));
+    smoothedMixWet.setTargetValue(static_cast<float>(mixWet));
 
     const SampleType hcTrimGain = juce::Decibels::decibelsToGain(hcTrimDB);
     const SampleType scTrimGain = juce::Decibels::decibelsToGain(scTrimDB);
     const SampleType slTrimGain = juce::Decibels::decibelsToGain(slTrimDB);
     const SampleType flTrimGain = juce::Decibels::decibelsToGain(flTrimDB);
 
+    // === MODE SWITCHING (LOCK-FREE - safe on audio thread) ===
     // Get current processing mode from parameter (NOT from osManager to detect changes)
     const int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
 
-    // Check if mode changed since prepareToPlay() - update osManager if needed
+    // Check if mode changed - update osManager with lock-free atomic operation
     if (processingMode != osManager.getProcessingMode())
     {
-        // Mode changed during playback - update osManager
-        osManager.prepare(currentSampleRate, buffer.getNumSamples(), processingMode);
+        // LOCK-FREE mode switch - NO memory allocation
+        osManager.setMode(processingMode);
 
         // Recalculate lookahead times based on new processing mode
         double xyProcessorLookaheadMs = 3.0;  // Default
@@ -778,15 +840,19 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
             fastLimiterState[ch].lookaheadWritePos = 0;
 
             // Clear lookahead buffers (prevent glitches from stale data)
+            // NOTE: These are already allocated to max size in prepareToPlay() - no resize needed
             std::fill(hardClipState[ch].lookaheadBuffer.begin(), hardClipState[ch].lookaheadBuffer.end(), 0.0);
             std::fill(softClipState[ch].lookaheadBuffer.begin(), softClipState[ch].lookaheadBuffer.end(), 0.0);
             std::fill(slowLimiterState[ch].lookaheadBuffer.begin(), slowLimiterState[ch].lookaheadBuffer.end(), 0.0);
             std::fill(fastLimiterState[ch].lookaheadBuffer.begin(), fastLimiterState[ch].lookaheadBuffer.end(), 0.0);
 
-            // Resize and clear dry delay buffer for new mode (at OS rate)
-            // v1.7.6: Delay in OS domain, so use OS-rate lookahead samples
-            dryDelayState[ch].delayBuffer.resize(lookaheadSamples, 0.0);
+            // Reset dry delay buffer write position (already allocated to max size)
+            // NO RESIZE - buffer is pre-allocated in prepareToPlay()
             dryDelayState[ch].writePos = 0;
+            // Clear only the portion we're using for this mode
+            const int clearSize = std::min(lookaheadSamples, static_cast<int>(dryDelayState[ch].delayBuffer.size()));
+            std::fill(dryDelayState[ch].delayBuffer.begin(),
+                     dryDelayState[ch].delayBuffer.begin() + clearSize, 0.0);
         }
     }
 
@@ -832,11 +898,23 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     originalInputBuffer.makeCopyOf(buffer);
 
     // === INPUT GAIN (Wet path only - drives saturation) ===
-    // Apply manual input gain to WET signal only
-    buffer.applyGain(inputGain);
+    // Apply manual input gain to WET signal only (smoothed per-sample to prevent zipper noise)
+    SampleType totalInputGainAccumulated = static_cast<SampleType>(0.0);
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+    {
+        auto* data = buffer.getWritePointer(ch);
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const SampleType smoothedGain = static_cast<SampleType>(smoothedInputGain.getNextValue());
+            data[i] *= smoothedGain;
+            if (ch == 0)  // Track only once per sample
+                totalInputGainAccumulated += smoothedGain;
+        }
+    }
 
-    // Store total input gain for GR calculation
-    const SampleType totalInputGain = normGain * inputGain;
+    // Store average total input gain for GR calculation
+    const SampleType avgSmoothedInputGain = totalInputGainAccumulated / static_cast<SampleType>(numSamples);
+    const SampleType totalInputGain = normGain * avgSmoothedInputGain;
 
     // Calculate bi-linear blend weights from XY pad
     // XY Grid Layout: Top-Left=SL, Top-Right=HC, Bottom-Left=SC, Bottom-Right=FL
@@ -870,6 +948,64 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
         wHC = wSC = wSL = wFL = static_cast<SampleType>(0.0);
     }
 
+    // === EARLY EXIT: All Processors Muted (Unity Gain Passthrough) ===
+    // When all processors are muted, skip ALL processing including oversampling
+    // This prevents oversampling filter coloration and ensures bit-perfect passthrough at 0% mix
+    // NOTE: At this point, buffer has input gain applied, so we rebuild from originalInputBuffer
+    if (allProcessorsMuted)
+    {
+        // Rebuild output from pristine input (buffer was modified by input gain loop)
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+        {
+            auto* out = buffer.getWritePointer(ch);
+            const auto* pristine = originalInputBuffer.getReadPointer(ch);
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const SampleType smoothedOutGain = static_cast<SampleType>(smoothedOutputGain.getNextValue());
+                const SampleType smoothedMix = static_cast<SampleType>(smoothedMixWet.getNextValue());
+
+                // Check for unity output gain (within 0.1% of 1.0)
+                // Critical for bit-perfect passthrough in unity gain test
+                const bool isUnityOutputGain = (smoothedOutGain > static_cast<SampleType>(0.999) &&
+                                                smoothedOutGain < static_cast<SampleType>(1.001));
+
+                // Dry/wet mix with threshold checks
+                // When all processors muted:
+                //   - "Dry" = pristine input (no gains)
+                //   - "Wet" = pristine input * output gain (no processing, just output scaling)
+                if (smoothedMix < static_cast<SampleType>(0.001))
+                {
+                    out[i] = pristine[i];  // Pure dry - bit-perfect passthrough
+                }
+                else if (smoothedMix > static_cast<SampleType>(0.999))
+                {
+                    // Pure wet (100% mix)
+                    if (isUnityOutputGain)
+                    {
+                        // Unity gain - bit-perfect passthrough
+                        out[i] = pristine[i];
+                    }
+                    else
+                    {
+                        // Apply output gain
+                        out[i] = pristine[i] * smoothedOutGain;
+                    }
+                }
+                else
+                {
+                    // Partial mix - crossfade between dry and wet
+                    SampleType wetSignal = isUnityOutputGain ? pristine[i] : pristine[i] * smoothedOutGain;
+                    out[i] = pristine[i] * (static_cast<SampleType>(1.0) - smoothedMix) + wetSignal * smoothedMix;
+                }
+            }
+        }
+
+        // Skip to protection limiters / output section
+        // (Fall through to overshoot limiter section below)
+    }
+    else
+    {
     // === ARCHITECTURE A: GLOBAL OVERSAMPLING + XY BLEND PROCESSING ===
     // v1.7.6: Both wet and dry MUST go through OS together for phase coherence
     // Problem: Calling oversampler twice (wet, then dry) causes phase misalignment
@@ -965,6 +1101,32 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
             }
         }
 
+        // === DELTA MODE: Compute in OS domain for perfect filter cancellation ===
+        // Computing delta BEFORE downsampling ensures both signals go through
+        // identical anti-aliasing filters, eliminating filter mismatch artifacts
+        if (deltaMode)
+        {
+            // Compute delta at oversampled rate: reference - processed
+            // Reference (dry) needs inputGain applied to match wet's gain staging
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                auto* wetData = osBlock4Ch.getChannelPointer(static_cast<size_t>(ch));      // Channels 0-1
+                auto* dryData = osBlock4Ch.getChannelPointer(static_cast<size_t>(ch + 2));  // Channels 2-3
+
+                for (int i = 0; i < osNumSamples; ++i)
+                {
+                    // Dry has normalization only, wet has normalization + inputGain + processing
+                    // For delta: apply inputGain to dry to get theoretical input level
+                    SampleType reference = dryData[i] * inputGain;
+                    SampleType processed = wetData[i];
+
+                    // Delta = what was removed by XY processing (gain reduction signal)
+                    // Store in wet channels - these will be downsampled to output
+                    wetData[i] = reference - processed;
+                }
+            }
+        }
+
         // Downsample all 4 channels together (phase-coherent)
         auto& tempBuffer2 = (std::is_same<SampleType, float>::value)
             ? reinterpret_cast<juce::AudioBuffer<SampleType>&>(tempBuffer2Float)
@@ -1029,20 +1191,27 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     // No output gain, no dry/wet mix - pure GR signal only
     if (deltaMode)
     {
-        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+        // In Modes 1/2, delta was already computed in OS domain for perfect filter cancellation
+        // In Mode 0, compute here at base rate (no OS filtering involved)
+        if (processingMode == 0)
         {
-            auto* output = buffer.getWritePointer(ch);
-            const auto* input = dryBuffer.getReadPointer(ch);
-
-            for (int i = 0; i < numSamples; ++i)
+            // Mode 0: No oversampling, compute delta at base rate
+            for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
             {
-                // Calculate pure gain reduction signal: what was removed by processing
-                // Dry has normalization only, so apply input gain to get theoretical input
-                SampleType inputGained = input[i] * inputGain;
-                SampleType grSignal = inputGained - output[i];
-                output[i] = grSignal;  // Output ONLY the difference (artifacts removed)
+                auto* output = buffer.getWritePointer(ch);
+                const auto* input = dryBuffer.getReadPointer(ch);
+
+                for (int i = 0; i < numSamples; ++i)
+                {
+                    // Calculate pure gain reduction signal: what was removed by processing
+                    // Dry has normalization only, so apply input gain to get theoretical input
+                    SampleType inputGained = input[i] * inputGain;
+                    SampleType grSignal = inputGained - output[i];
+                    output[i] = grSignal;  // Output ONLY the difference (artifacts removed)
+                }
             }
         }
+        // else: Modes 1/2 already computed delta in OS domain - buffer already contains delta
     }
     else
     {
@@ -1059,25 +1228,42 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
             buffer.applyGain(static_cast<SampleType>(1.0) / inputGain);
         }
 
-        // Apply output gain to wet BEFORE mixing
-        buffer.applyGain(outputGain);
-
-        // Dry/wet mix
-        if (mixWet < static_cast<SampleType>(1.0))
+        // Apply output gain to wet BEFORE mixing (smoothed per-sample to prevent zipper noise)
+        // Combined with dry/wet mix in single loop for efficiency
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
         {
-            for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
-            {
-                auto* wet = buffer.getWritePointer(ch);
-                const auto* dry = dryBuffer.getReadPointer(ch);
+            auto* wet = buffer.getWritePointer(ch);
+            const auto* dry = dryBuffer.getReadPointer(ch);
 
-                for (int i = 0; i < numSamples; ++i)
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const SampleType smoothedOutGain = static_cast<SampleType>(smoothedOutputGain.getNextValue());
+                const SampleType smoothedMix = static_cast<SampleType>(smoothedMixWet.getNextValue());
+
+                // Apply output gain to wet
+                wet[i] *= smoothedOutGain;
+
+                // Dry/wet mix with threshold checks for exact 0% and 100%
+                // Parameter smoothing may asymptotically approach but never reach extremes
+                // At < 0.1% mix, output pure dry signal (bit-perfect for null tests)
+                // At > 99.9% mix, output pure wet signal (no dry contamination)
+                if (smoothedMix < static_cast<SampleType>(0.001))
                 {
-                    // Dry is pristine (no gains), wet has all gains + processing
-                    wet[i] = dry[i] * (static_cast<SampleType>(1.0) - mixWet) + wet[i] * mixWet;
+                    wet[i] = dry[i];  // Pure dry - no wet contamination
+                }
+                else if (smoothedMix > static_cast<SampleType>(0.999))
+                {
+                    // Pure wet - already in wet[i], no change needed
+                }
+                else
+                {
+                    // Normal crossfade (dry is pristine, wet has all gains + processing)
+                    wet[i] = dry[i] * (static_cast<SampleType>(1.0) - smoothedMix) + wet[i] * smoothedMix;
                 }
             }
         }
     }
+    }  // End of else block (normal processing when processors are active)
 
     // === OVERSHOOT LIMITERS (Independent from Main Delta Mode) ===
     // Two discrete limiters that can be A/B tested independently:
@@ -1700,7 +1886,7 @@ void QuadBlendDriveAudioProcessor::processOvershootSuppression(juce::AudioBuffer
     const int processingMode = osManager.getProcessingMode();
 
     // MODE 0 (Zero Latency): NO oversampling for protection (flat frequency response)
-    // MODE 1/2: Use old oversamplers for now (TODO: refactor to use osManager)
+    // MODE 1/2: Use pre-allocated 2-channel oversamplers (NO allocation on audio thread!)
     const bool useOversampling = (processingMode != 0);
     juce::dsp::Oversampling<SampleType>* oversamplingPtr = nullptr;
 
@@ -1709,24 +1895,27 @@ void QuadBlendDriveAudioProcessor::processOvershootSuppression(juce::AudioBuffer
         if (std::is_same<SampleType, float>::value)
         {
             if (processingMode == 1)
-                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedFloat.get());
+                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversampling2ChBalancedFloat.get());
             else  // processingMode == 2
-                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseFloat.get());
+                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversampling2ChLinearFloat.get());
         }
         else
         {
             if (processingMode == 1)
-                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedDouble.get());
+                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversampling2ChBalancedDouble.get());
             else  // processingMode == 2
-                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseDouble.get());
+                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversampling2ChLinearDouble.get());
         }
     }
 
     // If reference buffer provided, process both through oversampling together for perfect alignment
     if (referenceBuffer != nullptr && useOversampling)
     {
-        // Create combined buffer (channels: L, R, RefL, RefR)
-        juce::AudioBuffer<SampleType> combinedBuffer(4, buffer.getNumSamples());
+        // Use pre-allocated buffer (NO allocation on audio thread)
+        auto& combinedBuffer = std::is_same_v<SampleType, float>
+            ? reinterpret_cast<juce::AudioBuffer<SampleType>&>(protectionDeltaCombined4ChFloat)
+            : reinterpret_cast<juce::AudioBuffer<SampleType>&>(protectionDeltaCombined4ChDouble);
+        combinedBuffer.setSize(4, buffer.getNumSamples(), false, false, true);
 
         // Copy main buffer to first 2 channels
         for (int ch = 0; ch < 2; ++ch)
@@ -1736,18 +1925,27 @@ void QuadBlendDriveAudioProcessor::processOvershootSuppression(juce::AudioBuffer
         for (int ch = 0; ch < 2; ++ch)
             combinedBuffer.copyFrom(ch + 2, 0, *referenceBuffer, ch, 0, buffer.getNumSamples());
 
-        // Create 4-channel oversampling object for delta mode (ensures perfect phase alignment)
-        constexpr size_t oversamplingFactor = 3;  // 2^3 = 8x
-        juce::dsp::Oversampling<SampleType> oversamplingDelta(
-            4,  // 4 channels
-            oversamplingFactor,
-            juce::dsp::Oversampling<SampleType>::filterHalfBandFIREquiripple,
-            true, false);
-        oversamplingDelta.initProcessing(static_cast<size_t>(buffer.getNumSamples()));
+        // Select delta oversampler matching current processing mode (NO allocation on audio thread!)
+        // Mode 1 (Balanced): 8×, Mode 2 (Linear Phase): 16×
+        // This ensures perfect phase alignment between main and reference at the correct rate
+        auto* oversamplingDelta = [&]() -> juce::dsp::Oversampling<SampleType>* {
+            if (std::is_same_v<SampleType, float>)
+            {
+                return (processingMode == 2)
+                    ? reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversampling4ChDelta16xFloat.get())
+                    : reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversampling4ChDeltaFloat.get());
+            }
+            else
+            {
+                return (processingMode == 2)
+                    ? reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversampling4ChDelta16xDouble.get())
+                    : reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversampling4ChDeltaDouble.get());
+            }
+        }();
 
         // Process combined buffer through oversampling
         juce::dsp::AudioBlock<SampleType> combinedBlock(combinedBuffer);
-        auto oversampledCombined = oversamplingDelta.processSamplesUp(combinedBlock);
+        auto oversampledCombined = oversamplingDelta->processSamplesUp(combinedBlock);
 
         // Apply parameter-interpolated processor ONLY to first 2 channels (main signal)
         // Get blend parameter (0 = clean/gentle, 1 = punchy/aggressive)
@@ -1824,7 +2022,7 @@ void QuadBlendDriveAudioProcessor::processOvershootSuppression(juce::AudioBuffer
         // Channels 2-3 (reference) pass through unchanged
 
         // Downsample together
-        oversamplingDelta.processSamplesDown(combinedBlock);
+        oversamplingDelta->processSamplesDown(combinedBlock);
 
         // Copy results back
         for (int ch = 0; ch < 2; ++ch)
@@ -1928,6 +2126,22 @@ void QuadBlendDriveAudioProcessor::processOvershootSuppression(juce::AudioBuffer
     // This ensures the plugin reports constant latency regardless of OSM mode
     const int osmDelay = advancedTPLLookaheadSamples;
 
+    // Guard against division by zero
+    if (osmDelay <= 0)
+    {
+        // Skip delay compensation - just apply final clamp
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+        {
+            auto* data = buffer.getWritePointer(ch);
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+            {
+                data[i] = juce::jlimit(static_cast<SampleType>(-ceilingLinear),
+                                       static_cast<SampleType>(ceilingLinear), data[i]);
+            }
+        }
+        return;
+    }
+
     for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
     {
         auto* data = buffer.getWritePointer(ch);
@@ -1976,7 +2190,7 @@ void QuadBlendDriveAudioProcessor::processAdvancedTPL(juce::AudioBuffer<SampleTy
     const int processingMode = osManager.getProcessingMode();
 
     // MODE 0 (Zero Latency): NO oversampling for protection (flat frequency response)
-    // MODE 1/2: Use old oversamplers for now (TODO: refactor to use osManager)
+    // MODE 1/2: Use pre-allocated 2-channel oversamplers (NO allocation on audio thread!)
     const bool useOversampling = (processingMode != 0);
     juce::dsp::Oversampling<SampleType>* oversamplingPtr = nullptr;
 
@@ -1985,16 +2199,16 @@ void QuadBlendDriveAudioProcessor::processAdvancedTPL(juce::AudioBuffer<SampleTy
         if (std::is_same<SampleType, float>::value)
         {
             if (processingMode == 1)
-                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedFloat.get());
+                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversampling2ChBalancedFloat.get());
             else  // processingMode == 2
-                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseFloat.get());
+                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversampling2ChLinearFloat.get());
         }
         else
         {
             if (processingMode == 1)
-                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingBalancedDouble.get());
+                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversampling2ChBalancedDouble.get());
             else  // processingMode == 2
-                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversamplingLinearPhaseDouble.get());
+                oversamplingPtr = reinterpret_cast<juce::dsp::Oversampling<SampleType>*>(oversampling2ChLinearDouble.get());
         }
     }
 
@@ -2006,6 +2220,24 @@ void QuadBlendDriveAudioProcessor::processAdvancedTPL(juce::AudioBuffer<SampleTy
 
     const size_t oversampledSamples = processingBlock.getNumSamples();
     const int lookahead = advancedTPLLookaheadSamples;
+
+    // Guard against division by zero
+    if (lookahead <= 0)
+    {
+        // Fallback to simple hard limiting
+        for (size_t ch = 0; ch < processingBlock.getNumChannels(); ++ch)
+        {
+            auto* data = processingBlock.getChannelPointer(ch);
+            for (size_t i = 0; i < oversampledSamples; ++i)
+            {
+                data[i] = juce::jlimit(static_cast<SampleType>(-ceilingLinear),
+                                       static_cast<SampleType>(ceilingLinear), data[i]);
+            }
+        }
+        if (useOversampling)
+            oversamplingPtr->processSamplesDown(block);
+        return;
+    }
 
     // Soft-knee parameters (designed for up to 6 dB GR)
     constexpr double kneeWidthDB = 1.5;  // Soft knee width in dB
