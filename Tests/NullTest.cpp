@@ -4,7 +4,7 @@
 #include <cmath>
 #include <vector>
 
-// Null Test Validation for QuadBlend Drive v1.8.0
+// Null Test Validation for STEVE v1.8.0
 // Tests bypass transparency, mix correctness, and unity gain behavior
 
 class NullTestRunner
@@ -159,8 +159,9 @@ public:
         setParameter("XY_X_PARAM", 0.5f);
         setParameter("XY_Y_PARAM", 0.5f);
 
-        // Disable protection limiters
-        setParameter("PROTECTION_ENABLE", 0.0f);
+        // Disable output limiters (simplified design)
+        setParameter("OVERSHOOT_ENABLE", 0.0f);
+        setParameter("TRUE_PEAK_ENABLE", 0.0f);
 
         // Delta mode OFF
         setParameter("DELTA_MODE", 0.0f);

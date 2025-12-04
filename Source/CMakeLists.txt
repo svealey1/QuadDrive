@@ -1,10 +1,10 @@
-juce_add_plugin(QuadBlendDrive
+juce_add_plugin(STEVE
     COMPANY_NAME "Steve Vealey"
-    BUNDLE_ID com.SteveVealey.QuadBlendDrive
+    BUNDLE_ID com.SteveVealey.STEVE
     PLUGIN_MANUFACTURER_CODE SvVy
-    PLUGIN_CODE Qbdr
+    PLUGIN_CODE Stve
     FORMATS VST3 AU
-    PRODUCT_NAME "Quad-Blend Drive"
+    PRODUCT_NAME "STEVE"
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT FALSE
@@ -14,14 +14,14 @@ juce_add_plugin(QuadBlendDrive
 )
 
 # Add source files
-target_sources(QuadBlendDrive
+target_sources(STEVE
     PRIVATE
         PluginProcessor.cpp
         PluginEditor.cpp
 )
 
 # Link JUCE modules
-target_link_libraries(QuadBlendDrive
+target_link_libraries(STEVE
     PRIVATE
         juce::juce_audio_utils
         juce::juce_dsp
@@ -32,7 +32,7 @@ target_link_libraries(QuadBlendDrive
 )
 
 # Compile definitions
-target_compile_definitions(QuadBlendDrive
+target_compile_definitions(STEVE
     PUBLIC
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0

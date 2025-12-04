@@ -5,24 +5,6 @@
 #include <array>
 #include "PluginProcessor.h"
 
-// Gain Reduction Meter Component
-class GainReductionMeter : public juce::Component, private juce::Timer
-{
-public:
-    GainReductionMeter(QuadBlendDriveAudioProcessor& p);
-
-    void paint(juce::Graphics& g) override;
-    void resized() override;
-
-private:
-    void timerCallback() override;
-
-    QuadBlendDriveAudioProcessor& processor;
-    static constexpr int historySize = 90;  // 3 seconds at 30fps (3s * 30fps = 90 samples)
-    std::array<float, historySize> grHistory;
-    int historyIndex = 0;
-};
-
 // Master Meter Component
 class MasterMeter : public juce::Component, private juce::Timer
 {
@@ -56,8 +38,39 @@ public:
 
 private:
     void timerCallback() override;
+    void paintGRTrace(juce::Graphics& g, juce::Rectangle<float> graphBounds, float scale);
 
     QuadBlendDriveAudioProcessor& processor;
+    static constexpr int displaySize = 90;  // 3 seconds at 30fps (matches GR meter)
+    int displayCursorPos = 0;
+};
+
+// Professional Waveform Display Component
+// Combines waveform visualization with sample-accurate gain reduction trace
+// Features smooth rendering with Catmull-Rom interpolation and RGB frequency coloring
+class WaveformDisplay : public juce::Component, private juce::Timer
+{
+public:
+    WaveformDisplay(QuadBlendDriveAudioProcessor& p);
+
+    void paint(juce::Graphics& g) override;
+    void resized() override;
+
+private:
+    void timerCallback() override;
+
+    // Catmull-Rom spline interpolation for smooth curves
+    static juce::Point<float> catmullRomInterpolate(
+        juce::Point<float> p0, juce::Point<float> p1,
+        juce::Point<float> p2, juce::Point<float> p3,
+        float t);
+
+    QuadBlendDriveAudioProcessor& processor;
+
+    // Display control
+    bool showGainReduction = true;
+    float verticalZoom = 1.0f;       // Waveform zoom factor
+    float grTraceHeight = 0.25f;     // GR trace height as fraction of component height
 };
 
 // Custom XY Pad Component
@@ -110,7 +123,6 @@ private:
     XYPad xyPad;
 
     // Visualizations
-    GainReductionMeter grMeter;
     Oscilloscope oscilloscope;
     MasterMeter masterMeter;
 
@@ -145,17 +157,16 @@ private:
     juce::TextButton overshootDeltaModeButton;
     juce::TextButton truePeakDeltaModeButton;
 
-    // Protection Limiter Controls
-    juce::TextButton protectionEnableButton;
-    juce::Slider protectionCeilingSlider;
-    juce::Label protectionCeilingLabel;
+    // === SIMPLIFIED OUTPUT LIMITER CONTROLS ===
+    // Shared ceiling for both limiters
+    juce::Slider outputCeilingSlider;
+    juce::Label outputCeilingLabel;
 
-    // Overshoot Character Blend Control
-    juce::Slider overshootBlendSlider;
-    juce::Label overshootBlendLabel;
+    // Overshoot Suppression: Character shaping (allows some overshoot for punch)
+    juce::TextButton overshootEnableButton;
 
-    // Overshoot Mode Toggle (Simple OSM vs Advanced TPL)
-    juce::TextButton overshootModeButton;
+    // True Peak Limiter: Strict ITU-R BS.1770-4 compliance (transparent)
+    juce::TextButton truePeakEnableButton;
 
     // Processing Mode Selector (Zero Latency, Balanced, Linear Phase)
     juce::ComboBox processingModeCombo;
@@ -195,10 +206,12 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> truePeakDeltaModeAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> masterCompAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> protectionEnableAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> protectionCeilingAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> overshootBlendAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> overshootModeAttachment;
+
+    // === SIMPLIFIED OUTPUT LIMITER ATTACHMENTS ===
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> outputCeilingAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> overshootEnableAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> truePeakEnableAttachment;
+
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> processingModeAttachment;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(QuadBlendDriveAudioProcessorEditor)

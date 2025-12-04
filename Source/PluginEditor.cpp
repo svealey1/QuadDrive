@@ -1,119 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
-//==============================================================================
-// GainReductionMeter Implementation
-//==============================================================================
-GainReductionMeter::GainReductionMeter(QuadBlendDriveAudioProcessor& p)
-    : processor(p)
-{
-    grHistory.fill(0.0f);
-    startTimerHz(30);  // 30 fps updates
-}
-
-void GainReductionMeter::paint(juce::Graphics& g)
-{
-    const auto bounds = getLocalBounds().toFloat();
-    const float width = bounds.getWidth();
-    const float height = bounds.getHeight();
-
-    // Scale factor based on current height (base height is 180)
-    const float scale = height / 180.0f;
-
-    // Modern gradient background
-    juce::ColourGradient gradient(juce::Colour(22, 22, 26), bounds.getX(), bounds.getY(),
-                                   juce::Colour(18, 18, 22), bounds.getX(), bounds.getBottom(), false);
-    g.setGradientFill(gradient);
-    g.fillRoundedRectangle(bounds, 6.0f * scale);
-
-    // Sleek title
-    g.setColour(juce::Colours::white.withAlpha(0.85f));
-    g.setFont(juce::Font(10.0f * scale, juce::Font::plain));
-    juce::Rectangle<float> titleArea(bounds.getX(), bounds.getY() + 6 * scale, width, 16.0f * scale);
-    g.drawText("GAIN REDUCTION", titleArea, juce::Justification::centred);
-
-    juce::Rectangle<float> graphBounds(bounds.getX() + 28 * scale, bounds.getY() + 26 * scale,
-                                        width - 34 * scale, height - 30 * scale);
-
-    // Detailed grid lines every 3dB
-    g.setFont(juce::Font(8.0f * scale, juce::Font::plain));
-
-    // Draw grid lines from -12 to +3 dB (every 3dB)
-    for (int db = -12; db <= 3; db += 3)
-    {
-        float y = graphBounds.getBottom() - ((db + 12.0f) / 15.0f) * graphBounds.getHeight();
-
-        // Major grid lines at 0, -6, -12
-        if (db == 0 || db == -6 || db == -12)
-        {
-            g.setColour(juce::Colour(50, 50, 55).withAlpha(0.4f));
-            g.drawLine(graphBounds.getX(), y, graphBounds.getRight(), y, 1.0f * scale);
-
-            // Labels
-            g.setColour(juce::Colours::white.withAlpha(0.7f));
-            juce::String label = (db > 0 ? "+" : "") + juce::String(db);
-            g.drawText(label, bounds.getX() + 3 * scale, y - 7 * scale, 24 * scale, 14 * scale,
-                      juce::Justification::centredLeft);
-        }
-        // Minor grid lines
-        else
-        {
-            g.setColour(juce::Colour(50, 50, 55).withAlpha(0.15f));
-            g.drawLine(graphBounds.getX(), y, graphBounds.getRight(), y, 0.5f * scale);
-
-            // Subtle labels for +3, -3, -9
-            g.setColour(juce::Colours::white.withAlpha(0.4f));
-            juce::String label = (db > 0 ? "+" : "") + juce::String(db);
-            g.drawText(label, bounds.getX() + 3 * scale, y - 7 * scale, 24 * scale, 14 * scale,
-                      juce::Justification::centredLeft);
-        }
-    }
-
-    // Draw GR history path with gradient effect
-    juce::Path grPath;
-    bool pathStarted = false;
-
-    for (int i = 0; i < historySize; ++i)
-    {
-        int idx = (historyIndex + i) % historySize;
-        float grDB = grHistory[idx];
-
-        float x = graphBounds.getX() + (i / float(historySize - 1)) * graphBounds.getWidth();
-        float y = graphBounds.getBottom() - ((grDB + 12.0f) / 15.0f) * graphBounds.getHeight();
-        y = juce::jlimit(graphBounds.getY(), graphBounds.getBottom(), y);
-
-        if (!pathStarted)
-        {
-            grPath.startNewSubPath(x, y);
-            pathStarted = true;
-        }
-        else
-        {
-            grPath.lineTo(x, y);
-        }
-    }
-
-    // Modern gradient stroke
-    g.setColour(juce::Colour(255, 120, 50));
-    g.strokePath(grPath, juce::PathStrokeType(2.0f * scale, juce::PathStrokeType::curved));
-
-    // Clean outer border
-    g.setColour(juce::Colour(60, 60, 65).withAlpha(0.4f));
-    g.drawRoundedRectangle(bounds.reduced(0.5f * scale), 6.0f * scale, 1.0f * scale);
-}
-
-void GainReductionMeter::resized()
-{
-    repaint();
-}
-
-void GainReductionMeter::timerCallback()
-{
-    float currentGR = processor.currentGainReductionDB.load();
-    grHistory[historyIndex] = currentGR;
-    historyIndex = (historyIndex + 1) % historySize;
-    repaint();
-}
+//=============================================================================
 
 //==============================================================================
 // Master Meter Implementation
@@ -380,7 +268,7 @@ void Oscilloscope::paint(juce::Graphics& g)
         for (int i = 0; i < displayPoints; ++i)
         {
             int bufferIndex = (i * bufferSize) / displayPoints;
-            int readPos = (writePos + bufferIndex) % bufferSize;
+            int readPos = bufferIndex;  // Still window: read directly from buffer position
 
             if (readPos >= 0 && readPos < bufferSize)
             {
@@ -414,7 +302,7 @@ void Oscilloscope::paint(juce::Graphics& g)
                 continue;
 
             int bufferIndex = (startIdx * bufferSize) / displayPoints;
-            int readPos = (writePos + bufferIndex) % bufferSize;
+            int readPos = bufferIndex;  // Still window: read directly from buffer position
 
             if (readPos >= 0 && readPos < bufferSize)
             {
@@ -439,7 +327,7 @@ void Oscilloscope::paint(juce::Graphics& g)
                 for (int i = startIdx; i <= endIdx && i < displayPoints; ++i)
                 {
                     int bufIdx = (i * bufferSize) / displayPoints;
-                    int rPos = (writePos + bufIdx) % bufferSize;
+                    int rPos = bufIdx;  // Still window: read directly from buffer position
 
                     if (rPos >= 0 && rPos < bufferSize)
                     {
@@ -469,6 +357,14 @@ void Oscilloscope::paint(juce::Graphics& g)
                 g.strokePath(segmentPath, juce::PathStrokeType(2.0f * scale, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
             }
         }
+
+        // Draw moving cursor at synchronized display position (matches GR meter)
+        float cursorX = graphBounds.getX() + (displayCursorPos / float(displaySize)) * graphBounds.getWidth();
+        g.setColour(juce::Colours::white.withAlpha(0.6f));
+        g.drawLine(cursorX, graphBounds.getY(), cursorX, graphBounds.getBottom(), 2.0f * scale);
+
+        // Draw GR trace overlay
+        paintGRTrace(g, graphBounds, scale);
     }
 
     // Clean outer border
@@ -483,7 +379,270 @@ void Oscilloscope::resized()
 
 void Oscilloscope::timerCallback()
 {
+    // Increment display cursor (synchronized with GR meter)
+    displayCursorPos = (displayCursorPos + 1) % displaySize;
     repaint();
+}
+
+void Oscilloscope::paintGRTrace(juce::Graphics& g, juce::Rectangle<float> graphBounds, float scale)
+{
+    const int bufferSize = processor.oscilloscopeSize.load();
+    const float width = graphBounds.getWidth();
+    const float height = graphBounds.getHeight();
+
+    // Vertical scale - match waveform's dB range
+    const float maxDisplayDb = 48.0f;  // Full vertical range
+    const float grDisplayRangeDb = 24.0f;  // Max GR depth to display
+    const float pixelsPerDb = height / maxDisplayDb;
+
+    const float thresholdDb = processor.apvts.getRawParameterValue("THRESHOLD")->load();
+
+    // 0 dBFS at TOP of waveform display (top 0 dBFS reference line is at 10% from top)
+    const float zeroDbY = graphBounds.getY() + graphBounds.getHeight() * 0.1f;
+
+    // Threshold line position (hangs DOWN from 0 dBFS by |thresholdDb| amount)
+    // e.g., -6 dB threshold = 6dB below the top
+    const float thresholdY = zeroDbY + std::abs(thresholdDb) * pixelsPerDb;
+
+    // Downsampling for display
+    const int displayPoints = juce::jmin(static_cast<int>(width * 2.0f), bufferSize);
+
+    // Build GR path
+    juce::Path grPath;
+    grPath.startNewSubPath(graphBounds.getX(), thresholdY);
+
+    for (int i = 0; i < displayPoints; ++i)
+    {
+        // Instead of segmenting bufferSize, just index buffer directly since we want pixel = time:
+        int bufferIndex = (i * bufferSize) / displayPoints;
+        int readPos = bufferIndex;
+        float grDb = 0.0f;
+        if (readPos >= 0 && readPos < bufferSize && readPos < processor.oscilloscopeGR.size())
+            grDb = processor.oscilloscopeGR[readPos];
+        // Clamp and map to screen
+        grDb = std::max(grDb, -grDisplayRangeDb);
+        float grY = thresholdY + std::abs(grDb) * pixelsPerDb;
+        grY = std::min(grY, graphBounds.getBottom());
+        float x = graphBounds.getX() + (i / float(displayPoints - 1)) * width;
+        if (i == 0)
+            grPath.startNewSubPath(x, grY);
+        else
+            grPath.lineTo(x, grY);
+    }
+
+    // Close path back to threshold line
+    grPath.lineTo(graphBounds.getRight(), thresholdY);
+    grPath.closeSubPath();
+
+    // Render filled area - semi-transparent orange
+    g.setColour(juce::Colour(0x66FF6600));
+    g.fillPath(grPath);
+
+    // Stroke outline - brighter orange
+    g.setColour(juce::Colour(0xFFFF8800));
+    g.strokePath(grPath, juce::PathStrokeType(1.5f * scale));
+
+    // Threshold line - grey
+    g.setColour(juce::Colours::grey.withAlpha(0.7f));
+    g.drawLine(graphBounds.getX(), thresholdY, graphBounds.getRight(), thresholdY, 1.0f * scale);
+
+    // 0 dBFS reference line - white (at top 0 dBFS position)
+    g.setColour(juce::Colours::white.withAlpha(0.5f));
+    g.drawLine(graphBounds.getX(), zeroDbY, graphBounds.getRight(), zeroDbY, 1.0f * scale);
+
+    // Label threshold value
+    g.setColour(juce::Colours::grey.withAlpha(0.9f));
+    g.setFont(juce::Font(8.0f * scale, juce::Font::plain));
+    juce::String thresholdLabel = juce::String(thresholdDb, 1) + " dB";
+    g.drawText(thresholdLabel, graphBounds.getX() + 5 * scale, thresholdY - 12 * scale,
+               60 * scale, 10 * scale, juce::Justification::centredLeft);
+}
+
+//==============================================================================
+// WaveformDisplay Implementation
+//==============================================================================
+WaveformDisplay::WaveformDisplay(QuadBlendDriveAudioProcessor& p)
+    : processor(p)
+{
+    // 60fps timer for smooth rendering
+    startTimerHz(60);
+}
+
+void WaveformDisplay::resized()
+{
+    // Component resizing handled automatically by paint()
+}
+
+void WaveformDisplay::timerCallback()
+{
+    // Update decimated display cache from high-resolution ring buffer
+    processor.updateDecimatedDisplay();
+
+    // Trigger repaint for smooth 60fps rendering
+    repaint();
+}
+
+juce::Point<float> WaveformDisplay::catmullRomInterpolate(
+    juce::Point<float> p0, juce::Point<float> p1,
+    juce::Point<float> p2, juce::Point<float> p3,
+    float t)
+{
+    // Catmull-Rom spline interpolation for smooth curves
+    // Creates smooth curves passing through p1 and p2, using p0 and p3 for slope
+    const float t2 = t * t;
+    const float t3 = t2 * t;
+
+    const float x = 0.5f * (
+        (2.0f * p1.x) +
+        (-p0.x + p2.x) * t +
+        (2.0f * p0.x - 5.0f * p1.x + 4.0f * p2.x - p3.x) * t2 +
+        (-p0.x + 3.0f * p1.x - 3.0f * p2.x + p3.x) * t3
+    );
+
+    const float y = 0.5f * (
+        (2.0f * p1.y) +
+        (-p0.y + p2.y) * t +
+        (2.0f * p0.y - 5.0f * p1.y + 4.0f * p2.y - p3.y) * t2 +
+        (-p0.y + 3.0f * p1.y - 3.0f * p2.y + p3.y) * t3
+    );
+
+    return {x, y};
+}
+
+void WaveformDisplay::paint(juce::Graphics& g)
+{
+    // Only render if decimated display is ready
+    if (!processor.decimatedDisplayReady.load())
+        return;
+
+    const auto bounds = getLocalBounds().toFloat();
+    const float width = bounds.getWidth();
+    const float height = bounds.getHeight();
+    const float centerY = height * 0.5f;
+
+    // Background
+    g.fillAll(juce::Colour(0xff1a1a1a));
+
+    // Grid lines
+    g.setColour(juce::Colour(0xff2a2a2a));
+    // Center line
+    g.drawHorizontalLine(static_cast<int>(centerY), 0.0f, width);
+    // ±6dB lines (at ±50% of height with zoom)
+    const float dbLineOffset = height * 0.25f / verticalZoom;
+    g.drawHorizontalLine(static_cast<int>(centerY - dbLineOffset), 0.0f, width);
+    g.drawHorizontalLine(static_cast<int>(centerY + dbLineOffset), 0.0f, width);
+
+    // === WAVEFORM RENDERING WITH MIN/MAX ENVELOPE ===
+    const int numSegments = processor.decimatedDisplaySize;
+    const float pixelsPerSegment = width / static_cast<float>(numSegments);
+
+    // Create path for waveform envelope
+    juce::Path waveformPath;
+    bool pathStarted = false;
+
+    // Render waveform as min/max envelope for accurate peak representation
+    for (int i = 0; i < numSegments; ++i)
+    {
+        const auto& segment = processor.decimatedDisplay[i];
+        const float x = static_cast<float>(i) * pixelsPerSegment;
+
+        // Convert amplitude to screen coordinates (with vertical zoom)
+        const float yMax = centerY - (segment.waveformMax * centerY * verticalZoom);
+        const float yMin = centerY - (segment.waveformMin * centerY * verticalZoom);
+
+        // Create filled envelope (top edge)
+        if (!pathStarted)
+        {
+            waveformPath.startNewSubPath(x, yMax);
+            pathStarted = true;
+        }
+        else
+        {
+            waveformPath.lineTo(x, yMax);
+        }
+    }
+
+    // Add bottom edge (reverse direction for filled path)
+    for (int i = numSegments - 1; i >= 0; --i)
+    {
+        const auto& segment = processor.decimatedDisplay[i];
+        const float x = static_cast<float>(i) * pixelsPerSegment;
+        const float yMin = centerY - (segment.waveformMin * centerY * verticalZoom);
+        waveformPath.lineTo(x, yMin);
+    }
+
+    waveformPath.closeSubPath();
+
+    // Fill waveform envelope with semi-transparent white
+    g.setColour(juce::Colour(0x80ffffff));
+    g.fillPath(waveformPath);
+
+    // === RGB FREQUENCY BAND COLORING ===
+    // Render RGB-colored segments based on dominant frequency band
+    for (int i = 0; i < numSegments; ++i)
+    {
+        const auto& segment = processor.decimatedDisplay[i];
+        const float x = static_cast<float>(i) * pixelsPerSegment;
+
+        // Normalize frequency bands to 0-1 range
+        const float totalEnergy = segment.avgLow + segment.avgMid + segment.avgHigh;
+        if (totalEnergy < 1e-6f)
+            continue;
+
+        const float lowNorm = segment.avgLow / totalEnergy;
+        const float midNorm = segment.avgMid / totalEnergy;
+        const float highNorm = segment.avgHigh / totalEnergy;
+
+        // Create RGB color based on frequency content
+        const juce::Colour freqColor(
+            static_cast<uint8_t>(lowNorm * 255),   // Red = low frequencies
+            static_cast<uint8_t>(midNorm * 255),   // Green = mid frequencies
+            static_cast<uint8_t>(highNorm * 255)   // Blue = high frequencies
+        );
+
+        // Draw colored bar at bottom of display
+        g.setColour(freqColor.withAlpha(0.5f));
+        g.fillRect(x, height - 20.0f, pixelsPerSegment, 20.0f);
+    }
+
+    // === GAIN REDUCTION TRACE (Synced with waveform) ===
+    if (showGainReduction)
+    {
+        juce::Path grPath;
+        bool grPathStarted = false;
+
+        const float grMaxHeight = height * grTraceHeight;
+
+        for (int i = 0; i < numSegments; ++i)
+        {
+            const auto& segment = processor.decimatedDisplay[i];
+            const float x = static_cast<float>(i) * pixelsPerSegment;
+
+            // Convert GR (in dB) to screen height (0 dB = no trace, higher dB = taller)
+            // Use max GR for this segment to show peaks
+            const float grDB = segment.grMax;
+            const float grHeight = std::min(grDB * 10.0f, grMaxHeight);  // 10 pixels per dB
+            const float y = grHeight;
+
+            if (!grPathStarted)
+            {
+                grPath.startNewSubPath(x, y);
+                grPathStarted = true;
+            }
+            else
+            {
+                grPath.lineTo(x, y);
+            }
+        }
+
+        // Draw GR trace with orange color (FabFilter style)
+        g.setColour(juce::Colour(0xffff8800).withAlpha(0.8f));
+        g.strokePath(grPath, juce::PathStrokeType(2.0f));
+    }
+
+    // === BORDER ===
+    g.setColour(juce::Colour(0xff404040));
+    g.drawRect(bounds, 1.0f);
 }
 
 //==============================================================================
@@ -530,21 +689,21 @@ void XYPad::paint(juce::Graphics& g)
     g.setColour(juce::Colours::white.withAlpha(0.5f));
     g.setFont(juce::Font(9.5f, juce::Font::plain));
 
-    // Top-left: Slow Limit
-    juce::Rectangle<float> slowLimitArea(10, 10, width / 2.0f - 20, 16);
-    g.drawText("SLOW", slowLimitArea, juce::Justification::centredLeft);
+    // Top-left: Hard Clip (Transparent/Safety Clipping)
+    juce::Rectangle<float> hardClipArea(10, 10, width / 2.0f - 20, 16);
+    g.drawText("HARD", hardClipArea, juce::Justification::centredLeft);
 
-    // Top-right: Hard Clip
-    juce::Rectangle<float> hardClipArea(width / 2.0f + 10, 10, width / 2.0f - 20, 16);
-    g.drawText("HARD", hardClipArea, juce::Justification::centredRight);
+    // Top-right: Fast Limit (Quick Response Limiting)
+    juce::Rectangle<float> fastLimitArea(width / 2.0f + 10, 10, width / 2.0f - 20, 16);
+    g.drawText("FAST", fastLimitArea, juce::Justification::centredRight);
 
-    // Bottom-left: Soft Clip
+    // Bottom-left: Soft Clip (Musical Warmth/Saturation)
     juce::Rectangle<float> softClipArea(10, height - 24, width / 2.0f - 20, 16);
     g.drawText("SOFT", softClipArea, juce::Justification::centredLeft);
 
-    // Bottom-right: Fast Limit
-    juce::Rectangle<float> fastLimitArea(width / 2.0f + 10, height - 24, width / 2.0f - 20, 16);
-    g.drawText("FAST", fastLimitArea, juce::Justification::centredRight);
+    // Bottom-right: Slow Limit (Smooth Mastering Character)
+    juce::Rectangle<float> slowLimitArea(width / 2.0f + 10, height - 24, width / 2.0f - 20, 16);
+    g.drawText("SLOW", slowLimitArea, juce::Justification::centredRight);
 
     // Draw thumb position with modern glow
     float x = xSlider.getValue();
@@ -654,7 +813,6 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     : AudioProcessorEditor(&p),
       audioProcessor(p),
       xyPad(p.apvts, "XY_X_PARAM", "XY_Y_PARAM", p),
-      grMeter(p),
       oscilloscope(p),
       masterMeter(p)
 {
@@ -666,7 +824,6 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     addAndMakeVisible(xyPad);
 
     // Setup Visualizations
-    addAndMakeVisible(grMeter);
     addAndMakeVisible(oscilloscope);
     addAndMakeVisible(masterMeter);
 
@@ -824,15 +981,21 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     deltaModeButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(255, 120, 50));
     deltaModeButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
     deltaModeButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+
+    // Auto-sync Master Comp with Delta Mode
+    deltaModeButton.onClick = [this]()
+    {
+        // Read current delta mode state (after toggle)
+        bool deltaModeOn = audioProcessor.apvts.getRawParameterValue("DELTA_MODE")->load() > 0.5f;
+
+        // Sync Master Comp to match Delta Mode
+        if (auto* masterCompParam = audioProcessor.apvts.getParameter("MASTER_COMP"))
+            masterCompParam->setValueNotifyingHost(deltaModeOn ? 1.0f : 0.0f);
+    };
+
     addAndMakeVisible(deltaModeButton);
 
-    overshootDeltaModeButton.setButtonText("O/S DELTA");
-    overshootDeltaModeButton.setClickingTogglesState(true);
-    overshootDeltaModeButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
-    overshootDeltaModeButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(180, 100, 200));
-    overshootDeltaModeButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
-    overshootDeltaModeButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
-    addAndMakeVisible(overshootDeltaModeButton);
+    // O/S Delta button removed - functionality integrated into main delta mode
 
     // TP Delta disabled for now - too complex to phase-align with lookahead buffer
     // truePeakDeltaModeButton.setButtonText("TP DELTA");
@@ -847,14 +1010,15 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     bypassButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
     addAndMakeVisible(bypassButton);
 
-    // Setup Master Gain Compensation Toggle - Consistent button styling
+    // Setup Master Gain Compensation Toggle - Hidden but functional (always enabled)
     masterCompButton.setButtonText("GAIN COMP");
     masterCompButton.setClickingTogglesState(true);
     masterCompButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
     masterCompButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(80, 220, 120));
     masterCompButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
     masterCompButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
-    addAndMakeVisible(masterCompButton);
+    addChildComponent(masterCompButton);
+    masterCompButton.setVisible(false);  // Hidden - always enabled
 
     // Setup Toggle Buttons for Muting - Modern styling
     auto setupMuteButton = [](juce::ToggleButton& button)
@@ -879,28 +1043,37 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     addAndMakeVisible(slMuteButton);
     addAndMakeVisible(flMuteButton);
 
-    // Setup No OverShoot Limiter Controls - Modern styling (green when active)
-    protectionEnableButton.setButtonText("NO OVERSHOOT");
-    protectionEnableButton.setClickingTogglesState(true);
-    protectionEnableButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
-    protectionEnableButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(80, 220, 120));
-    protectionEnableButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
-    protectionEnableButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
-    addAndMakeVisible(protectionEnableButton);
+    // === SIMPLIFIED OUTPUT LIMITER CONTROLS ===
 
-    setupRotarySlider(protectionCeilingSlider, protectionCeilingLabel, "Ceiling");
+    // Shared Output Ceiling Slider
+    setupRotarySlider(outputCeilingSlider, outputCeilingLabel, "Ceiling");
+    outputCeilingSlider.setTooltip("Output ceiling in dBTP\nUsed by both Overshoot and True Peak limiters");
 
-    // Setup Overshoot Character Blend Control
-    setupRotarySlider(overshootBlendSlider, overshootBlendLabel, "Character");
+    // Overshoot Enable Button
+    overshootEnableButton.setButtonText("OVERSHOOT");
+    overshootEnableButton.setClickingTogglesState(true);
+    overshootEnableButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
+    overshootEnableButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(200, 130, 60));  // Orange when on
+    overshootEnableButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.7f));
+    overshootEnableButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+    overshootEnableButton.setTooltip("Overshoot Suppression\n"
+                                      "• Character shaping with controlled overshoot\n"
+                                      "• Use for punch/warmth when strict compliance not needed\n"
+                                      "• Runs BEFORE True Peak if both enabled");
+    addAndMakeVisible(overshootEnableButton);
 
-    // OSM Mode Selector: OFF = Mode 0 (Safety Clipper), ON = Mode 1 (Advanced TPL)
-    overshootModeButton.setButtonText("OSM: SAFE");  // OFF = "CLIP" mode, ON = "SAFE" mode
-    overshootModeButton.setClickingTogglesState(true);
-    overshootModeButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
-    overshootModeButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(80, 180, 120));  // Green for "Safe" mode
-    overshootModeButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
-    overshootModeButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
-    addAndMakeVisible(overshootModeButton);
+    // True Peak Enable Button
+    truePeakEnableButton.setButtonText("TRUE PEAK");
+    truePeakEnableButton.setClickingTogglesState(true);
+    truePeakEnableButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
+    truePeakEnableButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(80, 180, 120));  // Green when on
+    truePeakEnableButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.7f));
+    truePeakEnableButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+    truePeakEnableButton.setTooltip("True Peak Limiter (ITU-R BS.1770-4)\n"
+                                     "• Strict compliance - guarantees ceiling\n"
+                                     "• Maximum transparency, minimal distortion\n"
+                                     "• Recommended for streaming/broadcast");
+    addAndMakeVisible(truePeakEnableButton);
 
     // Setup Preset Buttons (A, B, C, D) - Modern styling
     auto setupPresetButton = [this](juce::TextButton& recallBtn, juce::TextButton& saveBtn, const juce::String& label, int slot)
@@ -941,7 +1114,7 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     addAndMakeVisible(processingModeCombo);
 
     // Setup Version Label (upper right corner)
-    versionLabel.setText("v1.8.0", juce::dontSendNotification);
+    versionLabel.setText("v1.8.4", juce::dontSendNotification);
     versionLabel.setJustificationType(juce::Justification::centredRight);
     versionLabel.setFont(juce::Font(10.0f, juce::Font::plain));
     versionLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.5f));
@@ -978,27 +1151,30 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
         p.apvts, "FL_MUTE", flMuteButton);
     deltaModeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         p.apvts, "DELTA_MODE", deltaModeButton);
-    overshootDeltaModeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        p.apvts, "OVERSHOOT_DELTA_MODE", overshootDeltaModeButton);
+    // O/S Delta attachment removed - functionality integrated into main delta mode
+    // overshootDeltaModeAttachment removed
     truePeakDeltaModeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         p.apvts, "TRUE_PEAK_DELTA_MODE", truePeakDeltaModeButton);
     bypassAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         p.apvts, "BYPASS", bypassButton);
     masterCompAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         p.apvts, "MASTER_COMP", masterCompButton);
-    protectionEnableAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        p.apvts, "PROTECTION_ENABLE", protectionEnableButton);
-    protectionCeilingAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        p.apvts, "PROTECTION_CEILING", protectionCeilingSlider);
-    overshootBlendAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        p.apvts, "OVERSHOOT_BLEND", overshootBlendSlider);
-    overshootModeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        p.apvts, "OSM_MODE", overshootModeButton);
+
+    // === SIMPLIFIED OUTPUT LIMITER ATTACHMENTS ===
+    outputCeilingAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        p.apvts, "OUTPUT_CEILING", outputCeilingSlider);
+    overshootEnableAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        p.apvts, "OVERSHOOT_ENABLE", overshootEnableButton);
+    truePeakEnableAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        p.apvts, "TRUE_PEAK_ENABLE", truePeakEnableButton);
+
     processingModeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         p.apvts, "PROCESSING_MODE", processingModeCombo);
 
-    // OSM_MODE note: false = Mode 0 (Safety Clipper), true = Mode 1 (Advanced TPL)
-    // Both modes maintain constant latency via automatic compensation
+    // Initialize Master Comp to match Delta Mode state on plugin load
+    bool deltaModeOn = p.apvts.getRawParameterValue("DELTA_MODE")->load() > 0.5f;
+    if (auto* masterCompParam = p.apvts.getParameter("MASTER_COMP"))
+        masterCompParam->setValueNotifyingHost(deltaModeOn ? 1.0f : 0.0f);
 }
 
 QuadBlendDriveAudioProcessorEditor::~QuadBlendDriveAudioProcessorEditor()
@@ -1209,6 +1385,42 @@ void QuadBlendDriveAudioProcessorEditor::resized()
 
     centerSection.removeFromTop(static_cast<int>(12 * scale));  // Gap below Processing Mode selector
 
+    // Preset buttons above XY Pad in a single row (proportionally scaled and centered)
+    const int presetButtonWidth = static_cast<int>(42 * scale);
+    const int saveButtonWidth = static_cast<int>(56 * scale);
+    const int presetButtonHeight = static_cast<int>(25 * scale);
+    const int presetSpacing = static_cast<int>(4 * scale);
+
+    // Calculate total width of all preset buttons
+    int totalPresetWidth = (presetButtonWidth + presetSpacing + saveButtonWidth + presetSpacing * 2) * 4 - presetSpacing * 2;
+
+    auto presetRow = centerSection.removeFromTop(presetButtonHeight);
+    int presetXStart = presetRow.getX() + (presetRow.getWidth() - totalPresetWidth) / 2;
+
+    // Single row: A, Save A, B, Save B, C, Save C, D, Save D (centered)
+    int xPos = presetXStart;
+
+    presetButtonA.setBounds(xPos, presetRow.getY(), presetButtonWidth, presetButtonHeight);
+    xPos += presetButtonWidth + presetSpacing;
+    saveButtonA.setBounds(xPos, presetRow.getY(), saveButtonWidth, presetButtonHeight);
+    xPos += saveButtonWidth + presetSpacing * 2;
+
+    presetButtonB.setBounds(xPos, presetRow.getY(), presetButtonWidth, presetButtonHeight);
+    xPos += presetButtonWidth + presetSpacing;
+    saveButtonB.setBounds(xPos, presetRow.getY(), saveButtonWidth, presetButtonHeight);
+    xPos += saveButtonWidth + presetSpacing * 2;
+
+    presetButtonC.setBounds(xPos, presetRow.getY(), presetButtonWidth, presetButtonHeight);
+    xPos += presetButtonWidth + presetSpacing;
+    saveButtonC.setBounds(xPos, presetRow.getY(), saveButtonWidth, presetButtonHeight);
+    xPos += saveButtonWidth + presetSpacing * 2;
+
+    presetButtonD.setBounds(xPos, presetRow.getY(), presetButtonWidth, presetButtonHeight);
+    xPos += presetButtonWidth + presetSpacing;
+    saveButtonD.setBounds(xPos, presetRow.getY(), saveButtonWidth, presetButtonHeight);
+
+    centerSection.removeFromTop(static_cast<int>(15 * scale));  // Gap below preset buttons
+
     // Make XY Pad SQUARE - use the smaller dimension
     int availableHeight = centerSection.getHeight();
     int availableWidth = centerSection.getWidth();
@@ -1218,40 +1430,6 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     int xOffset = (availableWidth - xySize) / 2;
     int yOffset = (availableHeight - xySize) / 2;
     xyPad.setBounds(centerSection.getX() + xOffset, centerSection.getY() + yOffset, xySize, xySize);
-
-    // Preset buttons below XY Pad in a single row (proportionally scaled and centered)
-    const int presetButtonWidth = static_cast<int>(42 * scale);
-    const int saveButtonWidth = static_cast<int>(56 * scale);
-    const int presetButtonHeight = static_cast<int>(25 * scale);
-    const int presetSpacing = static_cast<int>(4 * scale);
-
-    // Calculate total width of all preset buttons
-    int totalPresetWidth = (presetButtonWidth + presetSpacing + saveButtonWidth + presetSpacing * 2) * 4 - presetSpacing * 2;
-
-    int presetYPos = centerSection.getY() + yOffset + xySize + static_cast<int>(15 * scale);
-    int presetXStart = centerSection.getX() + (centerSection.getWidth() - totalPresetWidth) / 2;
-
-    // Single row: A, Save A, B, Save B, C, Save C, D, Save D (centered)
-    int xPos = presetXStart;
-
-    presetButtonA.setBounds(xPos, presetYPos, presetButtonWidth, presetButtonHeight);
-    xPos += presetButtonWidth + presetSpacing;
-    saveButtonA.setBounds(xPos, presetYPos, saveButtonWidth, presetButtonHeight);
-    xPos += saveButtonWidth + presetSpacing * 2;
-
-    presetButtonB.setBounds(xPos, presetYPos, presetButtonWidth, presetButtonHeight);
-    xPos += presetButtonWidth + presetSpacing;
-    saveButtonB.setBounds(xPos, presetYPos, saveButtonWidth, presetButtonHeight);
-    xPos += saveButtonWidth + presetSpacing * 2;
-
-    presetButtonC.setBounds(xPos, presetYPos, presetButtonWidth, presetButtonHeight);
-    xPos += presetButtonWidth + presetSpacing;
-    saveButtonC.setBounds(xPos, presetYPos, saveButtonWidth, presetButtonHeight);
-    xPos += saveButtonWidth + presetSpacing * 2;
-
-    presetButtonD.setBounds(xPos, presetYPos, presetButtonWidth, presetButtonHeight);
-    xPos += presetButtonWidth + presetSpacing;
-    saveButtonD.setBounds(xPos, presetYPos, saveButtonWidth, presetButtonHeight);
 
     // ========== RIGHT SECTION (OUTPUT CONTROLS) ==========
     auto rightSection = bounds.reduced(padding, 0);
@@ -1276,20 +1454,15 @@ void QuadBlendDriveAudioProcessorEditor::resized()
         .withSizeKeepingCentre(buttonWidth, buttonHeight));
     rightSection.removeFromTop(spacing);
 
-    // Master Gain Compensation button
-    masterCompButton.setBounds(rightSection.removeFromTop(buttonHeight)
-        .withSizeKeepingCentre(buttonWidth, buttonHeight));
-    rightSection.removeFromTop(spacing);
+    // Master Gain Compensation button (hidden - always enabled)
+    // masterCompButton.setBounds(...) - removed, button is hidden
 
     // Delta Mode button
     deltaModeButton.setBounds(rightSection.removeFromTop(buttonHeight)
         .withSizeKeepingCentre(buttonWidth, buttonHeight));
-    rightSection.removeFromTop(spacing);
-
-    // Overshoot Delta Mode button
-    overshootDeltaModeButton.setBounds(rightSection.removeFromTop(buttonHeight)
-        .withSizeKeepingCentre(buttonWidth, buttonHeight));
     rightSection.removeFromTop(spacing * 2);
+
+    // O/S Delta button removed - functionality integrated into main delta mode
 
     // TP Delta disabled
     // truePeakDeltaModeButton.setBounds(rightSection.removeFromTop(buttonHeight)
@@ -1302,29 +1475,26 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     mixSlider.setBounds(mixRow.removeFromLeft(knobSize));
     rightSection.removeFromTop(spacing * 3);
 
-    // Protection Limiter Controls
-    auto protectionButtonRow = rightSection.removeFromTop(static_cast<int>(28 * scale));
-    protectionEnableButton.setBounds(protectionButtonRow.removeFromLeft(static_cast<int>(110 * scale)));
+    // === OUTPUT LIMITER CONTROLS (Simplified) ===
+    rightSection.removeFromTop(spacing * 2);
+
+    // Output Ceiling (shared by both limiters)
+    auto ceilingRow = rightSection.removeFromTop(knobSize);
+    outputCeilingLabel.setBounds(ceilingRow.removeFromLeft(static_cast<int>(60 * scale)).removeFromTop(knobSize));
+    outputCeilingSlider.setBounds(ceilingRow.removeFromLeft(knobSize));
     rightSection.removeFromTop(spacing);
 
-    auto protectionCeilingRow = rightSection.removeFromTop(knobSize);
-    protectionCeilingLabel.setBounds(protectionCeilingRow.removeFromLeft(static_cast<int>(60 * scale)).removeFromTop(knobSize));
-    protectionCeilingSlider.setBounds(protectionCeilingRow.removeFromLeft(knobSize));
+    // Overshoot Enable Button
+    auto overshootRow = rightSection.removeFromTop(static_cast<int>(28 * scale));
+    overshootEnableButton.setBounds(overshootRow.removeFromLeft(static_cast<int>(95 * scale)));
     rightSection.removeFromTop(spacing);
 
-    // Overshoot Character Blend Control
-    auto overshootBlendRow = rightSection.removeFromTop(knobSize);
-    overshootBlendLabel.setBounds(overshootBlendRow.removeFromLeft(static_cast<int>(60 * scale)).removeFromTop(knobSize));
-    overshootBlendSlider.setBounds(overshootBlendRow.removeFromLeft(knobSize));
-    rightSection.removeFromTop(spacing);
-
-    // Overshoot Mode Toggle Button
-    auto overshootModeButtonRow = rightSection.removeFromTop(static_cast<int>(28 * scale));
-    overshootModeButton.setBounds(overshootModeButtonRow.removeFromLeft(static_cast<int>(110 * scale)));
-    rightSection.removeFromTop(spacing);
+    // True Peak Enable Button
+    auto truePeakRow = rightSection.removeFromTop(static_cast<int>(28 * scale));
+    truePeakEnableButton.setBounds(truePeakRow.removeFromLeft(static_cast<int>(95 * scale)));
+    rightSection.removeFromTop(spacing * 2);
 
     // ========== BOTTOM (VISUALIZATIONS) - FULL WIDTH ==========
-    grMeter.setBounds(meterArea.reduced(padding, 0));
     oscilloscope.setBounds(oscilloscopeArea.reduced(padding, 0));
 
     // ========== RIGHT EDGE (MASTER METER) ==========

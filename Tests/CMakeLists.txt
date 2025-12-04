@@ -1,4 +1,4 @@
-# Null Test Executable for QuadBlend Drive
+# Null Test Executable for STEVE
 
 # Add executable
 add_executable(NullTest
@@ -35,11 +35,11 @@ target_compile_definitions(NullTest PRIVATE
     JUCE_STANDALONE_APPLICATION=1
     JUCE_USE_CURL=0
     JUCE_WEB_BROWSER=0
-    JucePlugin_Name="Quad-Blend Drive"
-    JucePlugin_Desc="Quad-Blend Drive"
+    JucePlugin_Name="STEVE"
+    JucePlugin_Desc="STEVE"
     JucePlugin_Manufacturer="Steve Vealey"
     JucePlugin_ManufacturerCode=0x53765679  # 'SvVy'
-    JucePlugin_PluginCode=0x51626472        # 'Qbdr'
+    JucePlugin_PluginCode=0x53747665        # 'Stve'
     JucePlugin_IsSynth=0
     JucePlugin_WantsMidiInput=0
     JucePlugin_ProducesMidiOutput=0

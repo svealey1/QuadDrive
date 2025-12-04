@@ -52,8 +52,57 @@ public:
     std::vector<float> oscilloscopeLowBand;     // Low frequencies (R channel)
     std::vector<float> oscilloscopeMidBand;     // Mid frequencies (G channel)
     std::vector<float> oscilloscopeHighBand;    // High frequencies (B channel)
+    std::vector<float> oscilloscopeGR;         // Gain reduction (dB, matches oscilloscopeWindow)
     std::atomic<int> oscilloscopeSize{0};
     std::atomic<int> oscilloscopeWritePos{0};
+
+    // === UNIFIED WAVEFORM + GR DISPLAY BUFFER ===
+    // Sample-accurate waveform and gain reduction data for professional oscilloscope display
+    struct DisplaySample
+    {
+        float waveformL = 0.0f;       // Left channel waveform
+        float waveformR = 0.0f;       // Right channel waveform
+        float gainReduction = 0.0f;   // Gain reduction in dB (positive values)
+        float lowBand = 0.0f;         // Low frequency band (<250 Hz) for red channel
+        float midBand = 0.0f;         // Mid frequency band (250-4000 Hz) for green channel
+        float highBand = 0.0f;        // High frequency band (>4000 Hz) for blue channel
+    };
+
+    // Ring buffer for real-time display capture (8192 samples ~= 170ms at 48kHz)
+    static constexpr int displayBufferSize = 8192;
+    std::array<DisplaySample, displayBufferSize> displayBuffer;
+    std::atomic<int> displayWritePos{0};
+
+    // Decimated display cache for efficient 60fps GUI rendering
+    // Each segment stores min/max envelope for accurate peak representation
+    struct DecimatedSegment
+    {
+        float waveformMin = 0.0f;     // Minimum waveform value in segment
+        float waveformMax = 0.0f;     // Maximum waveform value in segment
+        float grMin = 0.0f;           // Minimum GR in segment (dB)
+        float grMax = 0.0f;           // Maximum GR in segment (dB)
+        float avgLow = 0.0f;          // Average low band energy
+        float avgMid = 0.0f;          // Average mid band energy
+        float avgHigh = 0.0f;         // Average high band energy
+    };
+
+    static constexpr int decimatedDisplaySize = 512;  // 512 segments for GUI rendering
+    std::array<DecimatedSegment, decimatedDisplaySize> decimatedDisplay;
+    std::atomic<bool> decimatedDisplayReady{false};
+
+    // === TRANSPORT SYNC FOR DISPLAY ===
+    std::atomic<bool> isPlaying{false};
+    std::atomic<bool> wasPlaying{false};
+    std::atomic<int64_t> playheadSamplePos{0};  // Sample position from host
+
+    // Display buffer write control
+    std::atomic<bool> displayBufferFrozen{false};  // True when stopped
+
+    // Update decimated display cache (called from GUI thread)
+    void updateDecimatedDisplay();
+
+    // Update transport state and sync display (called from audio thread)
+    void updateTransportState();
 
     // Master meter for output level monitoring
     std::atomic<float> currentOutputPeakL{0.0f};
@@ -102,6 +151,11 @@ private:
     // Advanced True Peak Limiter with IRC (Intelligent Release Control)
     template<typename SampleType>
     void processAdvancedTPL(juce::AudioBuffer<SampleType>& buffer, SampleType ceilingDB, double sampleRate, juce::AudioBuffer<SampleType>* referenceBuffer = nullptr);
+
+    // Combined Limiters: Processes both Overshoot and True Peak in single oversample cycle
+    // (avoids double oversampling artifacts when both are enabled)
+    template<typename SampleType>
+    void processCombinedLimiters(juce::AudioBuffer<SampleType>& buffer, SampleType ceilingDB, double sampleRate);
 
     // Normalization helper
     void calculateNormalizationGain();
