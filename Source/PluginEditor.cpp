@@ -962,7 +962,7 @@ void AdvancedPanel::resized()
     const int rowHeight = 26;
     const int sectionGap = 12;
     const int labelWidth = 110;
-    const int sliderWidth = 210;  // Increased for better value visibility
+    const int sliderWidth = 280;  // Increased to 280 (track + 60px text box)
 
     // Soft Clip section
     softClipLabel.setBounds(bounds.getX(), yPos, bounds.getWidth(), 16);
@@ -1670,8 +1670,8 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     // Positioned absolutely to overlay the bottom section
     if (advancedPanel.isVisible())
     {
-        const int advancedPanelWidth = static_cast<int>(360 * scale);  // Increased from 320 for better visibility
-        const int advancedPanelHeight = static_cast<int>(340 * scale);  // Increased from 310
+        const int advancedPanelWidth = static_cast<int>(440 * scale);  // Increased to 440 for full slider + text box visibility
+        const int advancedPanelHeight = static_cast<int>(340 * scale);
         int advancedPanelY = advancedButtonY + advancedButtonHeight + static_cast<int>(8 * scale);
         int advancedPanelX = centerSection.getX() + (availableWidth - advancedPanelWidth) / 2;
         advancedPanel.setBounds(advancedPanelX, advancedPanelY, advancedPanelWidth, advancedPanelHeight);
