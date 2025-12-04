@@ -6,6 +6,9 @@ add_executable(NullTest
     ../Source/PluginProcessor.cpp
     ../Source/PluginEditor.cpp
     ../Source/OversamplingManager.h
+    ../Source/DSP/MicroClippingSymmetryRestorer.cpp
+    ../Source/DSP/TransientPreservingEnvelope.cpp
+    ../Source/DSP/AdaptiveReleaseLimiter.cpp
 )
 
 # Include directories

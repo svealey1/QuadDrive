@@ -18,6 +18,9 @@ target_sources(STEVE
     PRIVATE
         PluginProcessor.cpp
         PluginEditor.cpp
+        DSP/MicroClippingSymmetryRestorer.cpp
+        DSP/TransientPreservingEnvelope.cpp
+        DSP/AdaptiveReleaseLimiter.cpp
 )
 
 # Link JUCE modules

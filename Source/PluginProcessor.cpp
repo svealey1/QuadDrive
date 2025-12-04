@@ -167,6 +167,37 @@ QuadBlendDriveAudioProcessor::createParameterLayout()
         juce::StringArray{"Zero Latency", "Balanced", "Linear Phase"},
         0));  // Default to Zero Latency
 
+    // === ADVANCED DSP FEATURES ===
+    // MCSR (Micro-Clipping Symmetry Restoration) Parameters
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        "MCSR_STRENGTH", "MCSR Intensity",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.6f,
+        juce::String(), juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { return juce::String(value * 100.0f, 0) + " %"; }));
+
+    layout.add(std::make_unique<juce::AudioParameterBool>(
+        "MCSR_ENABLED", "MCSR On/Off", true));
+
+    // Transient-Preserving Envelope Parameters
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        "SLOW_LIMITER_RMS_MS", "Slow Limiter RMS Time",
+        juce::NormalisableRange<float>(10.0f, 100.0f, 1.0f), 30.0f,
+        juce::String(), juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { return juce::String(value, 0) + " ms"; }));
+
+    // Adaptive Release Parameters
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        "ADAPTIVE_RELEASE_MIN", "Min Release",
+        juce::NormalisableRange<float>(10.0f, 100.0f, 1.0f), 20.0f,
+        juce::String(), juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { return juce::String(value, 0) + " ms"; }));
+
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        "ADAPTIVE_RELEASE_MAX", "Max Release",
+        juce::NormalisableRange<float>(100.0f, 1000.0f, 10.0f), 500.0f,
+        juce::String(), juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { return juce::String(value, 0) + " ms"; }));
+
     return layout;
 }
 
@@ -529,6 +560,28 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
         // Allocate oversampled buffer (8x oversampling)
         protectionLimiterState[ch].oversampledBuffer.resize(samplesPerBlock * 8, 0.0);
     }
+
+    // ================================================================
+    // Initialize Advanced DSP Features
+    // ================================================================
+    // MCSR: Micro-Clipping Symmetry Restoration
+    mcsr.reset();
+    mcsr.setStrength(apvts.getRawParameterValue("MCSR_STRENGTH")->load());
+    mcsr.setEnabled(apvts.getRawParameterValue("MCSR_ENABLED")->load() > 0.5f);
+
+    // Transient-Preserving Envelope for Slow Limiter
+    slowLimiterEnvelope.reset();
+    slowLimiterEnvelope.setRMSSmoothingMs(
+        apvts.getRawParameterValue("SLOW_LIMITER_RMS_MS")->load(),
+        sampleRate);
+
+    // Adaptive Release Limiter
+    adaptiveSlowLimiter.reset();
+    adaptiveSlowLimiter.setBaseReleaseTimeMs(100.0f, sampleRate);  // Base release time
+    adaptiveSlowLimiter.setReleaseTimeBounds(
+        apvts.getRawParameterValue("ADAPTIVE_RELEASE_MIN")->load(),
+        apvts.getRawParameterValue("ADAPTIVE_RELEASE_MAX")->load(),
+        sampleRate);
 }
 
 void QuadBlendDriveAudioProcessor::releaseResources()
@@ -553,6 +606,11 @@ void QuadBlendDriveAudioProcessor::releaseResources()
     if (oversampling2ChBalancedDouble) oversampling2ChBalancedDouble->reset();
     if (oversampling2ChLinearFloat) oversampling2ChLinearFloat->reset();
     if (oversampling2ChLinearDouble) oversampling2ChLinearDouble->reset();
+
+    // Reset advanced DSP processors
+    mcsr.reset();
+    slowLimiterEnvelope.reset();
+    adaptiveSlowLimiter.reset();
 }
 
 //==============================================================================
