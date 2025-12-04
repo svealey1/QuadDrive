@@ -311,15 +311,15 @@ void Oscilloscope::paint(juce::Graphics& g)
                 float midAmp = processor.oscilloscopeMidBand[readPos];     // Green channel
                 float highAmp = processor.oscilloscopeHighBand[readPos];   // Blue channel
 
-                // Scale and normalize the RGB values
-                float colorScale = 3.0f;
+                // Full brightness - scale values directly to 0-255 range
+                // Use higher scale factor to ensure vibrant colors
+                float colorScale = 4.0f;
                 uint8_t red = static_cast<uint8_t>(juce::jlimit(0.0f, 255.0f, lowAmp * colorScale * 255.0f));
                 uint8_t green = static_cast<uint8_t>(juce::jlimit(0.0f, 255.0f, midAmp * colorScale * 255.0f));
                 uint8_t blue = static_cast<uint8_t>(juce::jlimit(0.0f, 255.0f, highAmp * colorScale * 255.0f));
 
+                // Create full brightness color - no dimming or adjustments
                 juce::Colour lineColor(red, green, blue);
-                if (lineColor.getBrightness() < 0.3f)
-                    lineColor = lineColor.brighter(0.3f);
 
                 // Create segment path
                 juce::Path segmentPath;
@@ -348,12 +348,8 @@ void Oscilloscope::paint(juce::Graphics& g)
                     }
                 }
 
-                // Draw glow layer
-                g.setColour(lineColor.withAlpha(0.2f));
-                g.strokePath(segmentPath, juce::PathStrokeType(4.0f * scale, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-
-                // Draw main line
-                g.setColour(lineColor.withAlpha(0.85f));
+                // Draw waveform with full brightness - no glow or shading
+                g.setColour(lineColor);
                 g.strokePath(segmentPath, juce::PathStrokeType(2.0f * scale, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
             }
         }
@@ -1260,10 +1256,9 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     auto masterMeterArea = bounds.removeFromRight(masterMeterWidth);
     bounds.removeFromRight(spacing);  // Gap between meter and main content
 
-    // Reserve bottom for visualizations - FULL WIDTH (reduced heights)
-    auto oscilloscopeArea = bounds.removeFromBottom(static_cast<int>(250 * scale));  // Reduced from 400
-    bounds.removeFromBottom(spacing);
-    auto meterArea = bounds.removeFromBottom(static_cast<int>(120 * scale));  // Reduced from 180
+    // Reserve bottom for waveform display - FULL WIDTH (matches master meter height)
+    // Combined height: previous meterArea (120) + spacing (10) + oscilloscope (250) = 380 * scale
+    auto oscilloscopeArea = bounds.removeFromBottom(static_cast<int>(380 * scale));
     bounds.removeFromBottom(spacing);
 
     // Proportional three-column layout: LEFT (Input) | CENTER (XY) | RIGHT (Output)
@@ -1498,9 +1493,8 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     oscilloscope.setBounds(oscilloscopeArea.reduced(padding, 0));
 
     // ========== RIGHT EDGE (MASTER METER) ==========
-    // Master meter fills vertical space from gain reduction meter to oscilloscope
-    // Calculate total height including both meter areas and the spacing between them
-    int masterMeterTop = meterArea.getY();
+    // Master meter matches waveform display height
+    int masterMeterTop = oscilloscopeArea.getY();
     int masterMeterBottom = oscilloscopeArea.getBottom();
     int masterMeterHeight = masterMeterBottom - masterMeterTop;
 
