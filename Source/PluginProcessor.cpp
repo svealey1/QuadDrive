@@ -59,7 +59,7 @@ QuadBlendDriveAudioProcessor::createParameterLayout()
         [](float value, int) { return juce::String(value, 1) + " %"; }));
 
     layout.add(std::make_unique<juce::AudioParameterFloat>(
-        "LIMIT_REL", "Limiter Release",
+        "LIMIT_REL", "Slow Limiter Release Scale",
         juce::NormalisableRange<float>(10.0f, 500.0f, 1.0f, 0.5f), 100.0f,
         juce::String(), juce::AudioProcessorParameter::genericParameter,
         [](float value, int) { return juce::String(value, 0) + " ms"; }));
@@ -1950,11 +1950,16 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
 
     // Fixed parameters for Slow Limiter
     const double attackMs = 3.0;                    // 3ms attack
-    const double fastReleaseMinMs = 20.0;          // Fast release min (for transients)
-    const double fastReleaseMaxMs = 40.0;          // Fast release max
-    const double slowReleaseMinMs = 300.0;         // Slow release min (for sustained)
-    const double slowReleaseMaxMs = 800.0;         // Slow release max
-    const double kneeDB = 3.0;                     // 3dB soft knee
+    const double kneeDB = 3.0;                      // 3dB soft knee
+
+    // Base release time scales the adaptive release ranges
+    // Default: 100ms → fast(20-40ms), slow(300-800ms)
+    // User can scale overall release speed via LIMIT_REL parameter
+    const double baseReleaseScale = static_cast<double>(baseReleaseMs) / 100.0;  // Normalize to default
+    const double fastReleaseMinMs = 20.0 * baseReleaseScale;    // Fast release min (for transients)
+    const double fastReleaseMaxMs = 40.0 * baseReleaseScale;    // Fast release max
+    const double slowReleaseMinMs = 300.0 * baseReleaseScale;   // Slow release min (for sustained)
+    const double slowReleaseMaxMs = 800.0 * baseReleaseScale;   // Slow release max
 
     // Time constants for envelope followers
     // MODE 0: direct sample rate, MODE 1-2: oversampled rate

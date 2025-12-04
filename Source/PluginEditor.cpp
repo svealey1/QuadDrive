@@ -803,14 +803,236 @@ void XYPad::updateParameters(juce::Point<float> position)
 }
 
 //==============================================================================
+// Advanced Panel Implementation
+//==============================================================================
+AdvancedPanel::AdvancedPanel(juce::AudioProcessorValueTreeState& apvts)
+    : apvts(apvts)
+{
+    // Configure section labels
+    softClipLabel.setText("SOFT CLIP", juce::dontSendNotification);
+    softClipLabel.setFont(juce::Font(10.0f, juce::Font::bold));
+    softClipLabel.setColour(juce::Label::textColourId, juce::Colour(180, 180, 190));
+    addAndMakeVisible(softClipLabel);
+
+    limitersLabel.setText("SLOW LIMITER", juce::dontSendNotification);
+    limitersLabel.setFont(juce::Font(10.0f, juce::Font::bold));
+    limitersLabel.setColour(juce::Label::textColourId, juce::Colour(180, 180, 190));
+    addAndMakeVisible(limitersLabel);
+
+    mcsrLabel.setText("MCSR (SYMMETRY RESTORATION)", juce::dontSendNotification);
+    mcsrLabel.setFont(juce::Font(10.0f, juce::Font::bold));
+    mcsrLabel.setColour(juce::Label::textColourId, juce::Colour(180, 180, 190));
+    addAndMakeVisible(mcsrLabel);
+
+    slowLimiterLabel.setText("TRANSIENT PRESERVATION", juce::dontSendNotification);
+    slowLimiterLabel.setFont(juce::Font(10.0f, juce::Font::bold));
+    slowLimiterLabel.setColour(juce::Label::textColourId, juce::Colour(180, 180, 190));
+    addAndMakeVisible(slowLimiterLabel);
+
+    fastLimiterLabel.setText("FAST LIMITER (ADAPTIVE RELEASE)", juce::dontSendNotification);
+    fastLimiterLabel.setFont(juce::Font(10.0f, juce::Font::bold));
+    fastLimiterLabel.setColour(juce::Label::textColourId, juce::Colour(180, 180, 190));
+    addAndMakeVisible(fastLimiterLabel);
+
+    compLabel.setText("GAIN COMPENSATION", juce::dontSendNotification);
+    compLabel.setFont(juce::Font(10.0f, juce::Font::bold));
+    compLabel.setColour(juce::Label::textColourId, juce::Colour(180, 180, 190));
+    addAndMakeVisible(compLabel);
+
+    // Soft Clip controls
+    scKneeSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    scKneeSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
+    addAndMakeVisible(scKneeSlider);
+    scKneeLabel.setText("Knee:", juce::dontSendNotification);
+    scKneeLabel.setFont(juce::Font(9.0f));
+    scKneeLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.7f));
+    addAndMakeVisible(scKneeLabel);
+    scKneeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "SC_KNEE", scKneeSlider);
+
+    // Slow Limiter controls
+    limitRelSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    limitRelSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
+    addAndMakeVisible(limitRelSlider);
+    limitRelLabel.setText("Release Scale:", juce::dontSendNotification);
+    limitRelLabel.setFont(juce::Font(9.0f));
+    limitRelLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.7f));
+    addAndMakeVisible(limitRelLabel);
+    limitRelAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "LIMIT_REL", limitRelSlider);
+
+    slowLimiterRmsSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    slowLimiterRmsSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
+    addAndMakeVisible(slowLimiterRmsSlider);
+    slowLimiterRmsLabel.setText("RMS Time:", juce::dontSendNotification);
+    slowLimiterRmsLabel.setFont(juce::Font(9.0f));
+    slowLimiterRmsLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.7f));
+    addAndMakeVisible(slowLimiterRmsLabel);
+    slowLimiterRmsAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "SLOW_LIMITER_RMS_MS", slowLimiterRmsSlider);
+
+    // MCSR controls
+    mcsrEnableButton.setButtonText("Enable");
+    mcsrEnableButton.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
+    addAndMakeVisible(mcsrEnableButton);
+    mcsrEnableAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(apvts, "MCSR_ENABLED", mcsrEnableButton);
+
+    mcsrStrengthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    mcsrStrengthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
+    addAndMakeVisible(mcsrStrengthSlider);
+    mcsrStrengthLabel.setText("Intensity:", juce::dontSendNotification);
+    mcsrStrengthLabel.setFont(juce::Font(9.0f));
+    mcsrStrengthLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.7f));
+    addAndMakeVisible(mcsrStrengthLabel);
+    mcsrStrengthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "MCSR_STRENGTH", mcsrStrengthSlider);
+
+    // Fast Limiter controls
+    fastLimiterAdaptiveButton.setButtonText("Enable Adaptive");
+    fastLimiterAdaptiveButton.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
+    addAndMakeVisible(fastLimiterAdaptiveButton);
+    fastLimiterAdaptiveAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(apvts, "FAST_LIMITER_ADAPTIVE", fastLimiterAdaptiveButton);
+
+    fastLimiterIntensitySlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    fastLimiterIntensitySlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
+    addAndMakeVisible(fastLimiterIntensitySlider);
+    fastLimiterIntensityLabel.setText("Intensity:", juce::dontSendNotification);
+    fastLimiterIntensityLabel.setFont(juce::Font(9.0f));
+    fastLimiterIntensityLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.7f));
+    addAndMakeVisible(fastLimiterIntensityLabel);
+    fastLimiterIntensityAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "FAST_LIMITER_ADAPTIVE_INTENSITY", fastLimiterIntensitySlider);
+
+    fastLimiterMinSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    fastLimiterMinSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
+    addAndMakeVisible(fastLimiterMinSlider);
+    fastLimiterMinLabel.setText("Min Release:", juce::dontSendNotification);
+    fastLimiterMinLabel.setFont(juce::Font(9.0f));
+    fastLimiterMinLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.7f));
+    addAndMakeVisible(fastLimiterMinLabel);
+    fastLimiterMinAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "FAST_LIMITER_RELEASE_MIN", fastLimiterMinSlider);
+
+    fastLimiterMaxSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    fastLimiterMaxSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
+    addAndMakeVisible(fastLimiterMaxSlider);
+    fastLimiterMaxLabel.setText("Max Release:", juce::dontSendNotification);
+    fastLimiterMaxLabel.setFont(juce::Font(9.0f));
+    fastLimiterMaxLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.7f));
+    addAndMakeVisible(fastLimiterMaxLabel);
+    fastLimiterMaxAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "FAST_LIMITER_RELEASE_MAX", fastLimiterMaxSlider);
+
+    // Gain Compensation controls
+    hcCompButton.setButtonText("Hard");
+    hcCompButton.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
+    addAndMakeVisible(hcCompButton);
+    hcCompAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(apvts, "HC_COMP", hcCompButton);
+
+    scCompButton.setButtonText("Soft");
+    scCompButton.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
+    addAndMakeVisible(scCompButton);
+    scCompAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(apvts, "SC_COMP", scCompButton);
+
+    slCompButton.setButtonText("Slow");
+    slCompButton.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
+    addAndMakeVisible(slCompButton);
+    slCompAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(apvts, "SL_COMP", slCompButton);
+
+    flCompButton.setButtonText("Fast");
+    flCompButton.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
+    addAndMakeVisible(flCompButton);
+    flCompAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(apvts, "FL_COMP", flCompButton);
+
+    setVisible(false);  // Start hidden
+}
+
+void AdvancedPanel::paint(juce::Graphics& g)
+{
+    auto bounds = getLocalBounds().toFloat();
+
+    // Dark background with subtle gradient
+    juce::ColourGradient gradient(juce::Colour(28, 28, 32), 0, 0,
+                                   juce::Colour(22, 22, 26), 0, bounds.getHeight(), false);
+    g.setGradientFill(gradient);
+    g.fillRoundedRectangle(bounds, 6.0f);
+
+    // Subtle border
+    g.setColour(juce::Colour(60, 60, 65));
+    g.drawRoundedRectangle(bounds, 6.0f, 1.0f);
+}
+
+void AdvancedPanel::resized()
+{
+    auto bounds = getLocalBounds().reduced(10);
+    int yPos = 10;
+    const int rowHeight = 25;
+    const int sectionGap = 15;
+    const int labelWidth = 100;
+    const int sliderWidth = 180;
+
+    // Soft Clip section
+    softClipLabel.setBounds(bounds.getX(), yPos, bounds.getWidth(), 15);
+    yPos += 20;
+    scKneeLabel.setBounds(bounds.getX(), yPos, labelWidth, rowHeight);
+    scKneeSlider.setBounds(bounds.getX() + labelWidth, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + sectionGap;
+
+    // Slow Limiter section
+    limitersLabel.setBounds(bounds.getX(), yPos, bounds.getWidth(), 15);
+    yPos += 20;
+    limitRelLabel.setBounds(bounds.getX(), yPos, labelWidth, rowHeight);
+    limitRelSlider.setBounds(bounds.getX() + labelWidth, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + sectionGap;
+
+    // MCSR section
+    mcsrLabel.setBounds(bounds.getX(), yPos, bounds.getWidth(), 15);
+    yPos += 20;
+    mcsrEnableButton.setBounds(bounds.getX(), yPos, 80, rowHeight);
+    mcsrStrengthLabel.setBounds(bounds.getX() + 90, yPos, labelWidth - 20, rowHeight);
+    mcsrStrengthSlider.setBounds(bounds.getX() + labelWidth + 70, yPos, sliderWidth - 70, rowHeight);
+    yPos += rowHeight + sectionGap;
+
+    // Transient Preservation section
+    slowLimiterLabel.setBounds(bounds.getX(), yPos, bounds.getWidth(), 15);
+    yPos += 20;
+    slowLimiterRmsLabel.setBounds(bounds.getX(), yPos, labelWidth, rowHeight);
+    slowLimiterRmsSlider.setBounds(bounds.getX() + labelWidth, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + sectionGap;
+
+    // Fast Limiter section
+    fastLimiterLabel.setBounds(bounds.getX(), yPos, bounds.getWidth(), 15);
+    yPos += 20;
+    fastLimiterAdaptiveButton.setBounds(bounds.getX(), yPos, 120, rowHeight);
+    yPos += rowHeight + 5;
+    fastLimiterIntensityLabel.setBounds(bounds.getX(), yPos, labelWidth, rowHeight);
+    fastLimiterIntensitySlider.setBounds(bounds.getX() + labelWidth, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + 5;
+    fastLimiterMinLabel.setBounds(bounds.getX(), yPos, labelWidth, rowHeight);
+    fastLimiterMinSlider.setBounds(bounds.getX() + labelWidth, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + 5;
+    fastLimiterMaxLabel.setBounds(bounds.getX(), yPos, labelWidth, rowHeight);
+    fastLimiterMaxSlider.setBounds(bounds.getX() + labelWidth, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + sectionGap;
+
+    // Gain Compensation section
+    compLabel.setBounds(bounds.getX(), yPos, bounds.getWidth(), 15);
+    yPos += 20;
+    hcCompButton.setBounds(bounds.getX(), yPos, 60, rowHeight);
+    scCompButton.setBounds(bounds.getX() + 70, yPos, 60, rowHeight);
+    slCompButton.setBounds(bounds.getX() + 140, yPos, 60, rowHeight);
+    flCompButton.setBounds(bounds.getX() + 210, yPos, 60, rowHeight);
+}
+
+void AdvancedPanel::setVisible(bool shouldBeVisible)
+{
+    Component::setVisible(shouldBeVisible);
+}
+
+//==============================================================================
 // Editor Implementation
 //==============================================================================
 QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlendDriveAudioProcessor& p)
     : AudioProcessorEditor(&p),
       audioProcessor(p),
       xyPad(p.apvts, "XY_X_PARAM", "XY_Y_PARAM", p),
+      advancedPanel(p.apvts),
       oscilloscope(p),
-      masterMeter(p)
+      masterMeter(p),
+      waveformDisplay(p)
 {
     setSize(850, 900);  // Default size
     setResizable(true, true);
@@ -819,9 +1041,20 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     // Setup XY Pad
     addAndMakeVisible(xyPad);
 
+    // Setup Advanced Panel
+    addAndMakeVisible(advancedPanel);
+    advancedToggleButton.setButtonText("ADVANCED");
+    advancedToggleButton.setClickingTogglesState(false);
+    advancedToggleButton.onClick = [this]() {
+        advancedPanel.setVisible(!advancedPanel.isVisible());
+        resized();  // Re-layout when panel visibility changes
+    };
+    addAndMakeVisible(advancedToggleButton);
+
     // Setup Visualizations
     addAndMakeVisible(oscilloscope);
     addAndMakeVisible(masterMeter);
+    addAndMakeVisible(waveformDisplay);
 
     // Setup Sliders - Global Controls (proportional sizing)
     auto setupRotarySlider = [this](juce::Slider& slider, juce::Label& label, const juce::String& text)
@@ -1425,6 +1658,27 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     int xOffset = (availableWidth - xySize) / 2;
     int yOffset = (availableHeight - xySize) / 2;
     xyPad.setBounds(centerSection.getX() + xOffset, centerSection.getY() + yOffset, xySize, xySize);
+
+    // Advanced Toggle Button - Centered below XY Pad
+    const int advancedButtonHeight = static_cast<int>(30 * scale);
+    const int advancedButtonWidth = static_cast<int>(120 * scale);
+    int advancedButtonY = centerSection.getY() + yOffset + xySize + static_cast<int>(10 * scale);
+    int advancedButtonX = centerSection.getX() + (availableWidth - advancedButtonWidth) / 2;
+    advancedToggleButton.setBounds(advancedButtonX, advancedButtonY, advancedButtonWidth, advancedButtonHeight);
+
+    // Advanced Panel - Centered below toggle button
+    if (advancedPanel.isVisible())
+    {
+        const int advancedPanelWidth = static_cast<int>(320 * scale);
+        const int advancedPanelHeight = static_cast<int>(310 * scale);
+        int advancedPanelY = advancedButtonY + advancedButtonHeight + static_cast<int>(5 * scale);
+        int advancedPanelX = centerSection.getX() + (availableWidth - advancedPanelWidth) / 2;
+        advancedPanel.setBounds(advancedPanelX, advancedPanelY, advancedPanelWidth, advancedPanelHeight);
+    }
+    else
+    {
+        advancedPanel.setBounds(0, 0, 0, 0);  // Hide when not visible
+    }
 
     // ========== RIGHT SECTION (OUTPUT CONTROLS) ==========
     auto rightSection = bounds.reduced(padding, 0);
