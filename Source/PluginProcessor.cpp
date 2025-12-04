@@ -1774,7 +1774,7 @@ void QuadBlendDriveAudioProcessor::processSoftClip(juce::AudioBuffer<SampleType>
     const int processingMode = osManager.getProcessingMode();
 
     const double ceilingD = static_cast<double>(ceiling);
-    const double color = static_cast<double>(knee) / 100.0;  // Convert knee percentage to color (0-1)
+    const double color = static_cast<double>(knee);  // knee is already normalized to 0-1
     const double drive = 1.0 + (color * 3.0);  // Drive: 1.0 to 4.0
 
     // Makeup gain: normalize so output reaches ceiling (matches Hard Clip/Limiters)
