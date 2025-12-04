@@ -381,7 +381,7 @@ private:
     // New DSP processors for advanced features
     MicroClippingSymmetryRestorer mcsr;
     TransientPreservingEnvelope slowLimiterEnvelope;
-    AdaptiveReleaseLimiter adaptiveSlowLimiter;
+    AdaptiveReleaseLimiter adaptiveFastLimiter;  // Adaptive release for Fast Limiter
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(QuadBlendDriveAudioProcessor)
 };

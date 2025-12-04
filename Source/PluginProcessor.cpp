@@ -178,23 +178,33 @@ QuadBlendDriveAudioProcessor::createParameterLayout()
     layout.add(std::make_unique<juce::AudioParameterBool>(
         "MCSR_ENABLED", "MCSR On/Off", true));
 
-    // Transient-Preserving Envelope Parameters
+    // Transient-Preserving Envelope Parameters (for Slow Limiter)
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         "SLOW_LIMITER_RMS_MS", "Slow Limiter RMS Time",
         juce::NormalisableRange<float>(10.0f, 100.0f, 1.0f), 30.0f,
         juce::String(), juce::AudioProcessorParameter::genericParameter,
         [](float value, int) { return juce::String(value, 0) + " ms"; }));
 
-    // Adaptive Release Parameters
+    // Fast Limiter Adaptive Release Parameters
+    layout.add(std::make_unique<juce::AudioParameterBool>(
+        "FAST_LIMITER_ADAPTIVE", "Fast Limiter Adaptive Release",
+        true));  // Enabled by default
+
     layout.add(std::make_unique<juce::AudioParameterFloat>(
-        "ADAPTIVE_RELEASE_MIN", "Min Release",
-        juce::NormalisableRange<float>(10.0f, 100.0f, 1.0f), 20.0f,
+        "FAST_LIMITER_ADAPTIVE_INTENSITY", "Fast Limiter Adaptive Intensity",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.7f,
+        juce::String(), juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { return juce::String(static_cast<int>(value * 100.0f)) + " %"; }));
+
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        "FAST_LIMITER_RELEASE_MIN", "Fast Limiter Min Release",
+        juce::NormalisableRange<float>(5.0f, 50.0f, 1.0f), 10.0f,
         juce::String(), juce::AudioProcessorParameter::genericParameter,
         [](float value, int) { return juce::String(value, 0) + " ms"; }));
 
     layout.add(std::make_unique<juce::AudioParameterFloat>(
-        "ADAPTIVE_RELEASE_MAX", "Max Release",
-        juce::NormalisableRange<float>(100.0f, 1000.0f, 10.0f), 500.0f,
+        "FAST_LIMITER_RELEASE_MAX", "Fast Limiter Max Release",
+        juce::NormalisableRange<float>(50.0f, 500.0f, 5.0f), 100.0f,
         juce::String(), juce::AudioProcessorParameter::genericParameter,
         [](float value, int) { return juce::String(value, 0) + " ms"; }));
 
@@ -575,12 +585,12 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
         apvts.getRawParameterValue("SLOW_LIMITER_RMS_MS")->load(),
         sampleRate);
 
-    // Adaptive Release Limiter
-    adaptiveSlowLimiter.reset();
-    adaptiveSlowLimiter.setBaseReleaseTimeMs(100.0f, sampleRate);  // Base release time
-    adaptiveSlowLimiter.setReleaseTimeBounds(
-        apvts.getRawParameterValue("ADAPTIVE_RELEASE_MIN")->load(),
-        apvts.getRawParameterValue("ADAPTIVE_RELEASE_MAX")->load(),
+    // Adaptive Release Limiter for Fast Limiter
+    adaptiveFastLimiter.reset();
+    adaptiveFastLimiter.setBaseReleaseTimeMs(10.0f, sampleRate);  // Fast Limiter default: 10ms
+    adaptiveFastLimiter.setReleaseTimeBounds(
+        apvts.getRawParameterValue("FAST_LIMITER_RELEASE_MIN")->load(),
+        apvts.getRawParameterValue("FAST_LIMITER_RELEASE_MAX")->load(),
         sampleRate);
 }
 
@@ -610,7 +620,7 @@ void QuadBlendDriveAudioProcessor::releaseResources()
     // Reset advanced DSP processors
     mcsr.reset();
     slowLimiterEnvelope.reset();
-    adaptiveSlowLimiter.reset();
+    adaptiveFastLimiter.reset();
 }
 
 //==============================================================================
@@ -2164,13 +2174,17 @@ void QuadBlendDriveAudioProcessor::processFastLimit(juce::AudioBuffer<SampleType
 
     // Fixed parameters for Fast Limiter
     const double attackMs = 1.0;        // 1ms attack
-    const double releaseMs = 10.0;      // 10ms release (fixed)
+    const double baseReleaseMs = 10.0;  // 10ms base release (can be modulated by adaptive system)
+
+    // Get adaptive release parameters
+    const bool adaptiveEnabled = apvts.getRawParameterValue("FAST_LIMITER_ADAPTIVE")->load() > 0.5f;
+    const float adaptiveIntensity = apvts.getRawParameterValue("FAST_LIMITER_ADAPTIVE_INTENSITY")->load();
 
     // MODE 0: direct sample rate, MODE 1-2: oversampled rate
     const double effectiveRate = (processingMode == 0) ? currentSampleRate : (currentSampleRate * 8.0);
 
     const double attackCoeff = std::exp(-1.0 / (attackMs * 0.001 * effectiveRate));
-    const double releaseCoeff = std::exp(-1.0 / (releaseMs * 0.001 * effectiveRate));
+    const double baseReleaseCoeff = std::exp(-1.0 / (baseReleaseMs * 0.001 * effectiveRate));
     const double thresholdD = static_cast<double>(threshold);
 
     // Gain smoothing filter coefficient to prevent control signal aliasing
@@ -2192,11 +2206,32 @@ void QuadBlendDriveAudioProcessor::processFastLimit(juce::AudioBuffer<SampleType
                 const double currentSample = static_cast<double>(data[i]);
                 const double inputAbs = std::abs(currentSample);
 
-                // Envelope follower with attack/release
+                // Envelope follower with attack/adaptive release
                 if (inputAbs > envelope)
+                {
+                    // Attack phase: immediate gain reduction
                     envelope = attackCoeff * envelope + (1.0 - attackCoeff) * inputAbs;
+                }
                 else
+                {
+                    // Release phase: use adaptive release if enabled
+                    double releaseCoeff = baseReleaseCoeff;
+
+                    if (adaptiveEnabled)
+                    {
+                        // Get adaptive release modulation (1.0 = base, <1.0 = faster, >1.0 = slower)
+                        const float adaptiveModulation = adaptiveFastLimiter.processSample(
+                            static_cast<float>(currentSample),
+                            static_cast<float>(thresholdD));
+
+                        // Blend between fixed and adaptive release
+                        const double modulationFactor = 1.0 + (adaptiveModulation - 1.0) * adaptiveIntensity;
+                        const double adaptiveReleaseMs = baseReleaseMs * modulationFactor;
+                        releaseCoeff = std::exp(-1.0 / (adaptiveReleaseMs * 0.001 * effectiveRate));
+                    }
+
                     envelope = releaseCoeff * envelope + (1.0 - releaseCoeff) * inputAbs;
+                }
 
                 // Clamp envelope to prevent extreme values
                 envelope = juce::jlimit(0.0, 10.0, envelope);
@@ -2252,11 +2287,32 @@ void QuadBlendDriveAudioProcessor::processFastLimit(juce::AudioBuffer<SampleType
             // Direct envelope detection (no pre-filtering)
             const double inputAbs = std::abs(currentSample);
 
-            // Envelope follower with attack/release
+            // Envelope follower with attack/adaptive release
             if (inputAbs > envelope)
+            {
+                // Attack phase: immediate gain reduction
                 envelope = attackCoeff * envelope + (1.0 - attackCoeff) * inputAbs;
+            }
             else
+            {
+                // Release phase: use adaptive release if enabled
+                double releaseCoeff = baseReleaseCoeff;
+
+                if (adaptiveEnabled)
+                {
+                    // Get adaptive release modulation (1.0 = base, <1.0 = faster, >1.0 = slower)
+                    const float adaptiveModulation = adaptiveFastLimiter.processSample(
+                        static_cast<float>(currentSample),
+                        static_cast<float>(thresholdD));
+
+                    // Blend between fixed and adaptive release
+                    const double modulationFactor = 1.0 + (adaptiveModulation - 1.0) * adaptiveIntensity;
+                    const double adaptiveReleaseMs = baseReleaseMs * modulationFactor;
+                    releaseCoeff = std::exp(-1.0 / (adaptiveReleaseMs * 0.001 * effectiveRate));
+                }
+
                 envelope = releaseCoeff * envelope + (1.0 - releaseCoeff) * inputAbs;
+            }
 
             // Clamp envelope to prevent extreme values
             envelope = juce::jlimit(0.0, 10.0, envelope);
