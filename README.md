@@ -54,6 +54,6 @@ Copyright © 2025 Steve Vealey. All rights reserved.
 
 ## Version
 
-Current version: 1.0.0
+Current version: 1.8.0
 
 See [CHANGELOG.md](CHANGELOG.md) for version history.
