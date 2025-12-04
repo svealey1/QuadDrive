@@ -45,9 +45,9 @@ target_compile_definitions(NullTest PRIVATE
     JucePlugin_ProducesMidiOutput=0
     JucePlugin_IsMidiEffect=0
     JucePlugin_EditorRequiresKeyboardFocus=0
-    JucePlugin_Version=1.8.0
-    JucePlugin_VersionCode=0x010800
-    JucePlugin_VersionString="1.8.0"
+    JucePlugin_Version=1.8.5
+    JucePlugin_VersionCode=0x010805
+    JucePlugin_VersionString="1.8.5"
 )
 
 # Set C++ standard

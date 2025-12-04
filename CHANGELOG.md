@@ -1,9 +1,42 @@
 # Changelog
 
-All notable changes to Quad-Blend Drive will be documented in this file.
+All notable changes to S.T.E.V.E. (Signal Transfer Enhanced Volume Engine) will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.8.5] - 2025-12-03 - "S.T.E.V.E. Rebrand + Display Refinements"
+
+### Project Rebrand
+Complete rebrand from "QuadBlend Drive" to "S.T.E.V.E." (Signal Transfer Enhanced Volume Engine)
+- Updated plugin name, bundle ID, and product codes across all build files
+- Updated UI branding and version display (v1.8.5)
+- Updated test suite naming and documentation
+
+### Display System Enhancements
+- **Unified Waveform + GR Display**: New DisplaySample struct with sample-accurate waveform and gain reduction data
+- **Decimated Display Cache**: Efficient 60fps GUI rendering with min/max envelope representation
+- **Transport Sync**: Display freezes when DAW is stopped for stable waveform viewing
+- **Ring Buffer**: 8192-sample ring buffer (~170ms at 48kHz) for real-time display capture
+- **Waveform Meter Height**: Increased from 250 to 380 pixels (matches master meter height perfectly)
+
+### Frequency Visualization Improvements
+- **Full Brightness Coloring**: Removed gradient/glow effects for cleaner frequency representation
+- **Vivid RGB Bands**: Increased color scale from 3.0 to 4.0 for more vibrant colors
+- **True Frequency Content**: Full opacity (1.0) shows instantaneous low/mid/high band energy
+- **Mid/Side Matrix**: Waveform displays Mid component (L+R)/2 for mono-compatible view
+  - Low frequencies (<250 Hz): Red channel
+  - Mid frequencies (250-4000 Hz): Green channel
+  - High frequencies (>4000 Hz): Blue channel
+
+### Code Quality
+- Removed obsolete GainReductionMeter class (replaced by WaveformDisplay)
+- Fixed compilation errors from removed class references
+- Net code reduction (11 insertions, 17 deletions)
+
+### Testing
+- All 9 null tests pass with 100% success rate (bit-perfect accuracy)
+- Verified bypass transparency, mix 0% purity, and unity gain accuracy
 
 ## [1.6.0] - 2025-11-23 - "Architecture A"
 

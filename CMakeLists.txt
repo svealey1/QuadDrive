@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
 
-project(STEVE VERSION 1.8.0)
+project(STEVE VERSION 1.8.5)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

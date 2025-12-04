@@ -4,7 +4,7 @@
 #include <cmath>
 #include <vector>
 
-// Null Test Validation for STEVE v1.8.0
+// Null Test Validation for STEVE v1.8.5
 // Tests bypass transparency, mix correctness, and unity gain behavior
 
 class NullTestRunner
@@ -308,7 +308,7 @@ public:
     void runAllTests()
     {
         std::cout << "\n=======================================" << std::endl;
-        std::cout << "QuadBlend Drive v1.8.0 - Null Test Suite" << std::endl;
+        std::cout << "STEVE v1.8.5 - Null Test Suite" << std::endl;
         std::cout << "=======================================" << std::endl;
 
         const int testBufferSize = 48000;  // 1 second at 48kHz
