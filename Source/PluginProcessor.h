@@ -3,9 +3,6 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
 #include "OversamplingManager.h"
-#include "DSP/MicroClippingSymmetryRestorer.h"
-#include "DSP/TransientPreservingEnvelope.h"
-#include "DSP/AdaptiveReleaseLimiter.h"
 
 class QuadBlendDriveAudioProcessor : public juce::AudioProcessor
 {
@@ -377,11 +374,6 @@ private:
 
     // Preset storage (A, B, C, D)
     juce::ValueTree presetSlots[4];
-
-    // New DSP processors for advanced features
-    MicroClippingSymmetryRestorer mcsr;
-    TransientPreservingEnvelope slowLimiterEnvelope;
-    AdaptiveReleaseLimiter adaptiveFastLimiter;  // Adaptive release for Fast Limiter
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(QuadBlendDriveAudioProcessor)
 };

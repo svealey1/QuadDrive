@@ -121,7 +121,7 @@ private:
     juce::AudioProcessorValueTreeState& apvts;
 
     // Section labels
-    juce::Label softClipLabel, limitersLabel, mcsrLabel, slowLimiterLabel, fastLimiterLabel, compLabel;
+    juce::Label softClipLabel, limitersLabel, compLabel;
 
     // Soft Clip controls
     juce::Slider scKneeSlider;
@@ -130,22 +130,6 @@ private:
     // Slow Limiter controls
     juce::Slider limitRelSlider;
     juce::Label limitRelLabel;
-    juce::Slider slowLimiterRmsSlider;
-    juce::Label slowLimiterRmsLabel;
-
-    // MCSR controls
-    juce::ToggleButton mcsrEnableButton;
-    juce::Slider mcsrStrengthSlider;
-    juce::Label mcsrStrengthLabel;
-
-    // Fast Limiter controls
-    juce::ToggleButton fastLimiterAdaptiveButton;
-    juce::Slider fastLimiterIntensitySlider;
-    juce::Label fastLimiterIntensityLabel;
-    juce::Slider fastLimiterMinSlider;
-    juce::Label fastLimiterMinLabel;
-    juce::Slider fastLimiterMaxSlider;
-    juce::Label fastLimiterMaxLabel;
 
     // Gain Compensation controls
     juce::ToggleButton hcCompButton, scCompButton, slCompButton, flCompButton;
@@ -153,13 +137,6 @@ private:
     // Parameter attachments
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> scKneeAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> limitRelAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> slowLimiterRmsAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> mcsrEnableAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mcsrStrengthAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> fastLimiterAdaptiveAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> fastLimiterIntensityAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> fastLimiterMinAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> fastLimiterMaxAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> hcCompAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> scCompAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> slCompAttachment;

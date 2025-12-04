@@ -167,47 +167,6 @@ QuadBlendDriveAudioProcessor::createParameterLayout()
         juce::StringArray{"Zero Latency", "Balanced", "Linear Phase"},
         0));  // Default to Zero Latency
 
-    // === ADVANCED DSP FEATURES ===
-    // MCSR (Micro-Clipping Symmetry Restoration) Parameters
-    layout.add(std::make_unique<juce::AudioParameterFloat>(
-        "MCSR_STRENGTH", "MCSR Intensity",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.6f,
-        juce::String(), juce::AudioProcessorParameter::genericParameter,
-        [](float value, int) { return juce::String(value * 100.0f, 0) + " %"; }));
-
-    layout.add(std::make_unique<juce::AudioParameterBool>(
-        "MCSR_ENABLED", "MCSR On/Off", true));
-
-    // Transient-Preserving Envelope Parameters (for Slow Limiter)
-    layout.add(std::make_unique<juce::AudioParameterFloat>(
-        "SLOW_LIMITER_RMS_MS", "Slow Limiter RMS Time",
-        juce::NormalisableRange<float>(10.0f, 100.0f, 1.0f), 30.0f,
-        juce::String(), juce::AudioProcessorParameter::genericParameter,
-        [](float value, int) { return juce::String(value, 0) + " ms"; }));
-
-    // Fast Limiter Adaptive Release Parameters
-    layout.add(std::make_unique<juce::AudioParameterBool>(
-        "FAST_LIMITER_ADAPTIVE", "Fast Limiter Adaptive Release",
-        true));  // Enabled by default
-
-    layout.add(std::make_unique<juce::AudioParameterFloat>(
-        "FAST_LIMITER_ADAPTIVE_INTENSITY", "Fast Limiter Adaptive Intensity",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.7f,
-        juce::String(), juce::AudioProcessorParameter::genericParameter,
-        [](float value, int) { return juce::String(static_cast<int>(value * 100.0f)) + " %"; }));
-
-    layout.add(std::make_unique<juce::AudioParameterFloat>(
-        "FAST_LIMITER_RELEASE_MIN", "Fast Limiter Min Release",
-        juce::NormalisableRange<float>(5.0f, 50.0f, 1.0f), 10.0f,
-        juce::String(), juce::AudioProcessorParameter::genericParameter,
-        [](float value, int) { return juce::String(value, 0) + " ms"; }));
-
-    layout.add(std::make_unique<juce::AudioParameterFloat>(
-        "FAST_LIMITER_RELEASE_MAX", "Fast Limiter Max Release",
-        juce::NormalisableRange<float>(50.0f, 500.0f, 5.0f), 100.0f,
-        juce::String(), juce::AudioProcessorParameter::genericParameter,
-        [](float value, int) { return juce::String(value, 0) + " ms"; }));
-
     return layout;
 }
 
@@ -570,28 +529,6 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
         // Allocate oversampled buffer (8x oversampling)
         protectionLimiterState[ch].oversampledBuffer.resize(samplesPerBlock * 8, 0.0);
     }
-
-    // ================================================================
-    // Initialize Advanced DSP Features
-    // ================================================================
-    // MCSR: Micro-Clipping Symmetry Restoration
-    mcsr.reset();
-    mcsr.setStrength(apvts.getRawParameterValue("MCSR_STRENGTH")->load());
-    mcsr.setEnabled(apvts.getRawParameterValue("MCSR_ENABLED")->load() > 0.5f);
-
-    // Transient-Preserving Envelope for Slow Limiter
-    slowLimiterEnvelope.reset();
-    slowLimiterEnvelope.setRMSSmoothingMs(
-        apvts.getRawParameterValue("SLOW_LIMITER_RMS_MS")->load(),
-        sampleRate);
-
-    // Adaptive Release Limiter for Fast Limiter
-    adaptiveFastLimiter.reset();
-    adaptiveFastLimiter.setBaseReleaseTimeMs(10.0f, sampleRate);  // Fast Limiter default: 10ms
-    adaptiveFastLimiter.setReleaseTimeBounds(
-        apvts.getRawParameterValue("FAST_LIMITER_RELEASE_MIN")->load(),
-        apvts.getRawParameterValue("FAST_LIMITER_RELEASE_MAX")->load(),
-        sampleRate);
 }
 
 void QuadBlendDriveAudioProcessor::releaseResources()
@@ -616,11 +553,6 @@ void QuadBlendDriveAudioProcessor::releaseResources()
     if (oversampling2ChBalancedDouble) oversampling2ChBalancedDouble->reset();
     if (oversampling2ChLinearFloat) oversampling2ChLinearFloat->reset();
     if (oversampling2ChLinearDouble) oversampling2ChLinearDouble->reset();
-
-    // Reset advanced DSP processors
-    mcsr.reset();
-    slowLimiterEnvelope.reset();
-    adaptiveFastLimiter.reset();
 }
 
 //==============================================================================
@@ -1081,24 +1013,6 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
             }
         }
     }
-
-    // === MCSR (MICRO-CLIPPING SYMMETRY RESTORATION) ANALYSIS ===
-    // Analyze buffer for waveform asymmetry before processing
-    // This recovers 0.8-1.5 dB of headroom by balancing asymmetrical peaks
-    // Zero latency, no phase shift, completely transparent
-    mcsr.setStrength(apvts.getRawParameterValue("MCSR_STRENGTH")->load());
-    mcsr.setEnabled(apvts.getRawParameterValue("MCSR_ENABLED")->load() > 0.5f);
-
-    // Convert buffer to float for MCSR analysis (works on float precision)
-    juce::AudioBuffer<float> analysisBuffer(buffer.getNumChannels(), numSamples);
-    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
-    {
-        for (int i = 0; i < numSamples; ++i)
-        {
-            analysisBuffer.setSample(ch, i, static_cast<float>(buffer.getSample(ch, i)));
-        }
-    }
-    mcsr.analyzeBlock(analysisBuffer, numSamples);
 
     // === SIGNAL FLOW (v1.7.4) ===
     // 1. Normalization applied to buffer (both dry and wet get this)
@@ -1807,10 +1721,7 @@ void QuadBlendDriveAudioProcessor::processHardClip(juce::AudioBuffer<SampleType>
             {
                 const double x = static_cast<double>(data[i]);
                 const double output = juce::jlimit(-thresholdD, thresholdD, x);
-
-                // Apply MCSR symmetry restoration
-                const float mcsrProcessed = mcsr.processSample(static_cast<float>(output));
-                data[i] = static_cast<SampleType>(mcsrProcessed);
+                data[i] = static_cast<SampleType>(output);
             }
         }
         return;
@@ -1843,10 +1754,7 @@ void QuadBlendDriveAudioProcessor::processHardClip(juce::AudioBuffer<SampleType>
 
             // Hard clip processing (osManager's oversampling handles anti-aliasing)
             const double output = juce::jlimit(-thresholdD, thresholdD, delayedSample);
-
-            // Apply MCSR symmetry restoration
-            const float mcsrProcessed = mcsr.processSample(static_cast<float>(output));
-            data[i] = static_cast<SampleType>(mcsrProcessed);
+            data[i] = static_cast<SampleType>(output);
         }
     }
 }
@@ -1891,10 +1799,7 @@ void QuadBlendDriveAudioProcessor::processSoftClip(juce::AudioBuffer<SampleType>
             {
                 const double x = static_cast<double>(data[i]) / ceilingD;
                 const double output = std::tanh(x * drive) * compensatedMakeup;
-
-                // Apply MCSR symmetry restoration
-                const float mcsrProcessed = mcsr.processSample(static_cast<float>(output * ceilingD));
-                data[i] = static_cast<SampleType>(mcsrProcessed);
+                data[i] = static_cast<SampleType>(output * ceilingD);
             }
         }
         return;
@@ -1927,10 +1832,7 @@ void QuadBlendDriveAudioProcessor::processSoftClip(juce::AudioBuffer<SampleType>
             // Tanh processing (osManager's oversampling handles anti-aliasing)
             const double x = delayedSample / ceilingD;
             const double output = std::tanh(x * drive) * compensatedMakeup;
-
-            // Apply MCSR symmetry restoration
-            const float mcsrProcessed = mcsr.processSample(static_cast<float>(output * ceilingD));
-            data[i] = static_cast<SampleType>(mcsrProcessed);
+            data[i] = static_cast<SampleType>(output * ceilingD);
         }
     }
 }
@@ -1997,11 +1899,7 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
             {
                 const double currentSample = static_cast<double>(data[i]);
                 const double inputAbs = std::abs(currentSample);
-
-                // Use TransientPreservingEnvelope for better transient detection
-                const float envelopeInput = static_cast<float>(currentSample);
-                const float detectedEnvelope = slowLimiterEnvelope.getEnvelope(envelopeInput);
-                const double inputEnvelope = static_cast<double>(detectedEnvelope);
+                const double inputEnvelope = inputAbs;  // Simple peak detection
 
                 // Track RMS for crest factor calculation (still needed for adaptive release)
                 const double inputSquared = currentSample * currentSample;
@@ -2051,10 +1949,7 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
                 // MODE 0: No gain smoothing (no oversampling = no aliasing to prevent)
                 // Apply gain directly for truly transparent zero-latency processing
                 const double limitedSample = currentSample * targetGain;
-
-                // Apply MCSR symmetry restoration
-                const float mcsrProcessed = mcsr.processSample(static_cast<float>(limitedSample));
-                data[i] = static_cast<SampleType>(mcsrProcessed);
+                data[i] = static_cast<SampleType>(limitedSample);
             }
         }
         return;
@@ -2090,11 +1985,7 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
             writePos = (writePos + 1) % lookaheadSamples;
 
             const double inputAbs = std::abs(currentSample);
-
-            // Use TransientPreservingEnvelope for better transient detection
-            const float envelopeInput = static_cast<float>(currentSample);
-            const float detectedEnvelope = slowLimiterEnvelope.getEnvelope(envelopeInput);
-            const double inputEnvelope = static_cast<double>(detectedEnvelope);
+            const double inputEnvelope = inputAbs;  // Simple peak detection
 
             // Track RMS for crest factor calculation (still needed for adaptive release)
             const double inputSquared = currentSample * currentSample;
@@ -2158,10 +2049,7 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
             smoothedGain = gainSmoothCoeff * smoothedGain + (1.0 - gainSmoothCoeff) * targetGain;
 
             const double limitedSample = delayedSample * smoothedGain;
-
-            // Apply MCSR symmetry restoration
-            const float mcsrProcessed = mcsr.processSample(static_cast<float>(limitedSample));
-            data[i] = static_cast<SampleType>(mcsrProcessed);
+            data[i] = static_cast<SampleType>(limitedSample);
         }
     }
 }
@@ -2179,17 +2067,13 @@ void QuadBlendDriveAudioProcessor::processFastLimit(juce::AudioBuffer<SampleType
 
     // Fixed parameters for Fast Limiter
     const double attackMs = 1.0;        // 1ms attack
-    const double baseReleaseMs = 10.0;  // 10ms base release (can be modulated by adaptive system)
-
-    // Get adaptive release parameters
-    const bool adaptiveEnabled = apvts.getRawParameterValue("FAST_LIMITER_ADAPTIVE")->load() > 0.5f;
-    const float adaptiveIntensity = apvts.getRawParameterValue("FAST_LIMITER_ADAPTIVE_INTENSITY")->load();
+    const double releaseMs = 10.0;      // 10ms release (fixed)
 
     // MODE 0: direct sample rate, MODE 1-2: oversampled rate
     const double effectiveRate = (processingMode == 0) ? currentSampleRate : (currentSampleRate * 8.0);
 
     const double attackCoeff = std::exp(-1.0 / (attackMs * 0.001 * effectiveRate));
-    const double baseReleaseCoeff = std::exp(-1.0 / (baseReleaseMs * 0.001 * effectiveRate));
+    const double releaseCoeff = std::exp(-1.0 / (releaseMs * 0.001 * effectiveRate));
     const double thresholdD = static_cast<double>(threshold);
 
     // Gain smoothing filter coefficient to prevent control signal aliasing
@@ -2219,22 +2103,7 @@ void QuadBlendDriveAudioProcessor::processFastLimit(juce::AudioBuffer<SampleType
                 }
                 else
                 {
-                    // Release phase: use adaptive release if enabled
-                    double releaseCoeff = baseReleaseCoeff;
-
-                    if (adaptiveEnabled)
-                    {
-                        // Get adaptive release modulation (1.0 = base, <1.0 = faster, >1.0 = slower)
-                        const float adaptiveModulation = adaptiveFastLimiter.processSample(
-                            static_cast<float>(currentSample),
-                            static_cast<float>(thresholdD));
-
-                        // Blend between fixed and adaptive release
-                        const double modulationFactor = 1.0 + (adaptiveModulation - 1.0) * adaptiveIntensity;
-                        const double adaptiveReleaseMs = baseReleaseMs * modulationFactor;
-                        releaseCoeff = std::exp(-1.0 / (adaptiveReleaseMs * 0.001 * effectiveRate));
-                    }
-
+                    // Release phase: fixed 10ms release
                     envelope = releaseCoeff * envelope + (1.0 - releaseCoeff) * inputAbs;
                 }
 
@@ -2254,10 +2123,7 @@ void QuadBlendDriveAudioProcessor::processFastLimit(juce::AudioBuffer<SampleType
                 // MODE 0: No gain smoothing (no oversampling = no aliasing to prevent)
                 // Apply gain directly for truly transparent zero-latency processing
                 const double limitedSample = currentSample * targetGain;
-
-                // Apply MCSR symmetry restoration
-                const float mcsrProcessed = mcsr.processSample(static_cast<float>(limitedSample));
-                data[i] = static_cast<SampleType>(mcsrProcessed);
+                data[i] = static_cast<SampleType>(limitedSample);
             }
         }
         return;
@@ -2300,22 +2166,7 @@ void QuadBlendDriveAudioProcessor::processFastLimit(juce::AudioBuffer<SampleType
             }
             else
             {
-                // Release phase: use adaptive release if enabled
-                double releaseCoeff = baseReleaseCoeff;
-
-                if (adaptiveEnabled)
-                {
-                    // Get adaptive release modulation (1.0 = base, <1.0 = faster, >1.0 = slower)
-                    const float adaptiveModulation = adaptiveFastLimiter.processSample(
-                        static_cast<float>(currentSample),
-                        static_cast<float>(thresholdD));
-
-                    // Blend between fixed and adaptive release
-                    const double modulationFactor = 1.0 + (adaptiveModulation - 1.0) * adaptiveIntensity;
-                    const double adaptiveReleaseMs = baseReleaseMs * modulationFactor;
-                    releaseCoeff = std::exp(-1.0 / (adaptiveReleaseMs * 0.001 * effectiveRate));
-                }
-
+                // Release phase: fixed 10ms release
                 envelope = releaseCoeff * envelope + (1.0 - releaseCoeff) * inputAbs;
             }
 
@@ -2336,10 +2187,7 @@ void QuadBlendDriveAudioProcessor::processFastLimit(juce::AudioBuffer<SampleType
             smoothedGain = gainSmoothCoeff * smoothedGain + (1.0 - gainSmoothCoeff) * targetGain;
 
             const double limitedSample = delayedSample * smoothedGain;
-
-            // Apply MCSR symmetry restoration
-            const float mcsrProcessed = mcsr.processSample(static_cast<float>(limitedSample));
-            data[i] = static_cast<SampleType>(mcsrProcessed);
+            data[i] = static_cast<SampleType>(limitedSample);
         }
     }
 }
