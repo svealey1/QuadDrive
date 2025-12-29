@@ -18,6 +18,10 @@ target_sources(STEVE
     PRIVATE
         PluginProcessor.cpp
         PluginEditor.cpp
+        TransferCurveMeter.cpp
+        StereoMeter.cpp
+        ThresholdMeter.cpp
+        WaveformGRMeter.cpp
 )
 
 # Link JUCE modules

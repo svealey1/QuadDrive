@@ -3,6 +3,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
 #include "OversamplingManager.h"
+#include "DSP/EnvelopeShaper.h"
 
 class QuadBlendDriveAudioProcessor : public juce::AudioProcessor
 {
@@ -23,7 +24,7 @@ public:
     const juce::String getName() const override { return JucePlugin_Name; }
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
-    double getTailLengthSeconds() const override { return 0.0; }
+    double getTailLengthSeconds() const override { return 1.0; }  // 800ms slow limiter release + margin
     int getLatencySamples() const { return totalLatencySamples; }  // 3ms + 4ms = 7ms total
 
     int getNumPrograms() override { return 1; }
@@ -35,6 +36,30 @@ public:
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
 
+    // === TRANSFER CURVE METER: PARAMETER GETTERS ===
+    float getXY_X() const { return apvts.getRawParameterValue("XY_X_PARAM")->load(); }
+    float getXY_Y() const { return apvts.getRawParameterValue("XY_Y_PARAM")->load(); }
+    float getDriveHC() const { return apvts.getRawParameterValue("HC_TRIM")->load(); }
+    float getDriveSC() const { return apvts.getRawParameterValue("SC_TRIM")->load(); }
+    float getDriveSL() const { return apvts.getRawParameterValue("SL_TRIM")->load(); }
+    float getDriveFL() const { return apvts.getRawParameterValue("FL_TRIM")->load(); }
+    int getSoloIndex() const {
+        // Return 0-3 for soloed processor, -1 if no solo
+        if (apvts.getRawParameterValue("HC_SOLO")->load() > 0.5f) return 0;
+        if (apvts.getRawParameterValue("SC_SOLO")->load() > 0.5f) return 1;
+        if (apvts.getRawParameterValue("SL_SOLO")->load() > 0.5f) return 2;
+        if (apvts.getRawParameterValue("FL_SOLO")->load() > 0.5f) return 3;
+        return -1;
+    }
+    float getCurrentPeakNormalized() const { return juce::jlimit(0.0f, 1.0f, meterPeak.load()); }
+
+    // === STEREO I/O METERS: GETTERS ===
+    // Allow peaks up to +6dBFS (linear gain ~2.0) for true peak metering
+    float getInputPeakL() const { return juce::jlimit(0.0f, 2.0f, inputPeakL.load()); }
+    float getInputPeakR() const { return juce::jlimit(0.0f, 2.0f, inputPeakR.load()); }
+    float getOutputPeakL() const { return juce::jlimit(0.0f, 2.0f, outputPeakL.load()); }
+    float getOutputPeakR() const { return juce::jlimit(0.0f, 2.0f, outputPeakR.load()); }
+
     juce::AudioProcessorValueTreeState apvts;
 
     // Normalization state - exposed for UI
@@ -45,6 +70,27 @@ public:
 
     // For UI visualization
     std::atomic<float> currentGainReductionDB{0.0f};
+
+    // === TRANSFER CURVE METER: PEAK FOLLOWER ===
+    std::atomic<float> meterPeak{0.0f};  // Normalized 0-1 peak for transfer curve meter
+
+    // === STEREO I/O METERS: TRUE PEAK FOLLOWERS (ITU-R BS.1770-4 compliant) ===
+    std::atomic<float> inputPeakL{0.0f};   // Input true peak left channel
+    std::atomic<float> inputPeakR{0.0f};   // Input true peak right channel
+    std::atomic<float> outputPeakL{0.0f};  // Output true peak left channel
+    std::atomic<float> outputPeakR{0.0f};  // Output true peak right channel
+
+    // === WAVEFORM GR METER: PER-PROCESSOR DATA ===
+    // Track per-processor outputs and gain reduction (for waveform GR meter visualization)
+    std::atomic<float> currentInputPeak{0.0f};        // Input signal peak
+    std::atomic<float> currentHardClipPeak{0.0f};     // HC output peak
+    std::atomic<float> currentSoftClipPeak{0.0f};     // SC output peak
+    std::atomic<float> currentSlowLimitPeak{0.0f};    // SL output peak
+    std::atomic<float> currentFastLimitPeak{0.0f};    // FL output peak
+    std::atomic<float> currentHardClipGR{0.0f};       // HC GR (dB, positive = reduction)
+    std::atomic<float> currentSoftClipGR{0.0f};       // SC GR (dB, positive = reduction)
+    std::atomic<float> currentSlowLimitGR{0.0f};      // SL GR (dB, positive = reduction)
+    std::atomic<float> currentFastLimitGR{0.0f};      // FL GR (dB, positive = reduction)
 
     // Oscilloscope data - ring buffer for waveform display (2000ms)
     // Stores three frequency bands (low, mid, high) for RGB coloring
@@ -66,6 +112,29 @@ public:
         float lowBand = 0.0f;         // Low frequency band (<250 Hz) for red channel
         float midBand = 0.0f;         // Mid frequency band (250-4000 Hz) for green channel
         float highBand = 0.0f;        // High frequency band (>4000 Hz) for blue channel
+
+        // === WAVEFORM GR METER: PER-PROCESSOR OUTPUTS ===
+        // Raw per-processor outputs (before XY blend weighting)
+        float inputSignal = 0.0f;           // After input gain, before drive processing
+        float hardClipOutput = 0.0f;        // Raw HC output (not blend-weighted)
+        float softClipOutput = 0.0f;        // Raw SC output (not blend-weighted)
+        float slowLimitOutput = 0.0f;       // Raw SL output (not blend-weighted)
+        float fastLimitOutput = 0.0f;       // Raw FL output (not blend-weighted)
+        float finalOutput = 0.0f;           // After XY blend + output gain (what user hears)
+
+        // Legacy fields (kept for compatibility with existing visualizers)
+        float hardClipContribution = 0.0f;  // Blended HC contribution (scaled by XY weight)
+        float softClipContribution = 0.0f;  // Blended SC contribution (scaled by XY weight)
+        float slowLimitContribution = 0.0f; // Blended SL contribution (scaled by XY weight)
+        float fastLimitContribution = 0.0f; // Blended FL contribution (scaled by XY weight)
+
+        // === THRESHOLD METER: PER-PROCESSOR GAIN REDUCTION ===
+        // Gain reduction = how much each processor pulled the signal down
+        // Calculated as: (inputSignal - processorOutput) * blendWeight
+        float hardClipGainReduction = 0.0f;   // HC reduction (positive = reduction)
+        float softClipGainReduction = 0.0f;   // SC reduction (positive = reduction)
+        float slowLimitGainReduction = 0.0f;  // SL reduction (positive = reduction)
+        float fastLimitGainReduction = 0.0f;  // FL reduction (positive = reduction)
     };
 
     // Ring buffer for real-time display capture (8192 samples ~= 170ms at 48kHz)
@@ -84,6 +153,21 @@ public:
         float avgLow = 0.0f;          // Average low band energy
         float avgMid = 0.0f;          // Average mid band energy
         float avgHigh = 0.0f;         // Average high band energy
+
+        // === WAVEFORM GR METER: PER-PROCESSOR OUTPUT MIN/MAX ===
+        // Raw per-processor outputs (not blend-weighted)
+        float inputMin = 0.0f, inputMax = 0.0f;               // Input signal
+        float hardClipMin = 0.0f, hardClipMax = 0.0f;         // HC raw output
+        float softClipMin = 0.0f, softClipMax = 0.0f;         // SC raw output
+        float slowLimitMin = 0.0f, slowLimitMax = 0.0f;       // SL raw output
+        float fastLimitMin = 0.0f, fastLimitMax = 0.0f;       // FL raw output
+        float finalOutputMin = 0.0f, finalOutputMax = 0.0f;   // Final blended output
+
+        // === THRESHOLD METER: GAIN REDUCTION MIN/MAX ===
+        float hardClipGRMin = 0.0f, hardClipGRMax = 0.0f;
+        float softClipGRMin = 0.0f, softClipGRMax = 0.0f;
+        float slowLimitGRMin = 0.0f, slowLimitGRMax = 0.0f;
+        float fastLimitGRMin = 0.0f, fastLimitGRMax = 0.0f;
     };
 
     static constexpr int decimatedDisplaySize = 512;  // 512 segments for GUI rendering
@@ -139,10 +223,10 @@ private:
     void processSoftClip(juce::AudioBuffer<SampleType>& buffer, SampleType ceiling, SampleType knee, double sampleRate);
 
     template<typename SampleType>
-    void processSlowLimit(juce::AudioBuffer<SampleType>& buffer, SampleType threshold, SampleType releaseMs, double sampleRate);
+    void processSlowLimit(juce::AudioBuffer<SampleType>& buffer, SampleType threshold, SampleType releaseMs, SampleType attackMs, double sampleRate);
 
     template<typename SampleType>
-    void processFastLimit(juce::AudioBuffer<SampleType>& buffer, SampleType threshold, double sampleRate);
+    void processFastLimit(juce::AudioBuffer<SampleType>& buffer, SampleType threshold, SampleType attackMs, double sampleRate);
 
     // Overshoot suppression (true-peak safety with 8x oversampling)
     template<typename SampleType>
@@ -156,6 +240,10 @@ private:
     // (avoids double oversampling artifacts when both are enabled)
     template<typename SampleType>
     void processCombinedLimiters(juce::AudioBuffer<SampleType>& buffer, SampleType ceilingDB, double sampleRate);
+
+    // True Peak Measurement (ITU-R BS.1770-4 compliant using 4x oversampling)
+    template<typename SampleType>
+    float measureTruePeak(const SampleType* channelData, int numSamples);
 
     // Normalization helper
     void calculateNormalizationGain();
@@ -353,6 +441,16 @@ private:
     juce::AudioBuffer<float> originalInputBufferFloat;  // Pristine input before any gains
     juce::AudioBuffer<float> protectionDeltaCombined4ChFloat;  // Pre-allocated for overshoot delta mode
 
+    // === DRIVE VISUALIZER LAYER BUFFERS ===
+    // Temporary storage for per-layer contributions at base sample rate
+    // Populated during processBlock, read during display buffer write
+    juce::AudioBuffer<float> layerInputFloat;        // Input signal (after input gain)
+    juce::AudioBuffer<float> layerHardClipFloat;     // HC contribution (weighted)
+    juce::AudioBuffer<float> layerSoftClipFloat;     // SC contribution (weighted)
+    juce::AudioBuffer<float> layerSlowLimitFloat;    // SL contribution (weighted)
+    juce::AudioBuffer<float> layerFastLimitFloat;    // FL contribution (weighted)
+    juce::AudioBuffer<float> layerFinalOutputFloat;  // Final output (after output gain)
+
     // Buffers for parallel processing (double)
     juce::AudioBuffer<double> dryBufferDouble;
     juce::AudioBuffer<double> tempBuffer1Double;
@@ -362,6 +460,14 @@ private:
     juce::AudioBuffer<double> combined4ChDouble;  // For phase-coherent dry/wet processing
     juce::AudioBuffer<double> originalInputBufferDouble;  // Pristine input before any gains
     juce::AudioBuffer<double> protectionDeltaCombined4ChDouble;  // Pre-allocated for overshoot delta mode
+
+    // === DRIVE VISUALIZER LAYER BUFFERS (DOUBLE PRECISION) ===
+    juce::AudioBuffer<double> layerInputDouble;
+    juce::AudioBuffer<double> layerHardClipDouble;
+    juce::AudioBuffer<double> layerSoftClipDouble;
+    juce::AudioBuffer<double> layerSlowLimitDouble;
+    juce::AudioBuffer<double> layerFastLimitDouble;
+    juce::AudioBuffer<double> layerFinalOutputDouble;
 
     // Normalization state variables (use double precision for peak detection)
     double peakInputLevel{0.0};
@@ -374,6 +480,43 @@ private:
 
     // Preset storage (A, B, C, D)
     juce::ValueTree presetSlots[4];
+
+    // Envelope shapers for pre-drive transient/sustain shaping (one per drive type)
+    EnvelopeShaper hardClipShaper;
+    EnvelopeShaper softClipShaper;
+    EnvelopeShaper slowLimitShaper;
+    EnvelopeShaper fastLimitShaper;
+
+    // === SAMPLE-ACCURATE PER-PROCESSOR ENVELOPE FOLLOWERS ===
+    // For smooth GR visualization at base rate
+    // Fast attack (< 1ms), medium release (~50ms) for responsive yet smooth display
+    struct ProcessorEnvelope
+    {
+        float inputEnv = 0.0f;
+        float hardClipEnv = 0.0f;
+        float softClipEnv = 0.0f;
+        float slowLimitEnv = 0.0f;
+        float fastLimitEnv = 0.0f;
+        float attackCoeff = 0.0f;
+        float releaseCoeff = 0.0f;
+
+        void prepare(double sampleRate)
+        {
+            // Attack: ~0.5ms, Release: ~50ms
+            attackCoeff = static_cast<float>(std::exp(-1.0 / (sampleRate * 0.0005)));
+            releaseCoeff = static_cast<float>(std::exp(-1.0 / (sampleRate * 0.050)));
+        }
+
+        void processEnvelope(float& env, float input)
+        {
+            float absInput = std::abs(input);
+            if (absInput > env)
+                env = attackCoeff * env + (1.0f - attackCoeff) * absInput;
+            else
+                env = releaseCoeff * env + (1.0f - releaseCoeff) * absInput;
+        }
+    };
+    ProcessorEnvelope processorEnvelope[2];  // Stereo
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(QuadBlendDriveAudioProcessor)
 };

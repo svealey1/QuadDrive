@@ -455,192 +455,6 @@ void Oscilloscope::paintGRTrace(juce::Graphics& g, juce::Rectangle<float> graphB
 }
 
 //==============================================================================
-// WaveformDisplay Implementation
-//==============================================================================
-WaveformDisplay::WaveformDisplay(QuadBlendDriveAudioProcessor& p)
-    : processor(p)
-{
-    // 60fps timer for smooth rendering
-    startTimerHz(60);
-}
-
-void WaveformDisplay::resized()
-{
-    // Component resizing handled automatically by paint()
-}
-
-void WaveformDisplay::timerCallback()
-{
-    // Update decimated display cache from high-resolution ring buffer
-    processor.updateDecimatedDisplay();
-
-    // Trigger repaint for smooth 60fps rendering
-    repaint();
-}
-
-juce::Point<float> WaveformDisplay::catmullRomInterpolate(
-    juce::Point<float> p0, juce::Point<float> p1,
-    juce::Point<float> p2, juce::Point<float> p3,
-    float t)
-{
-    // Catmull-Rom spline interpolation for smooth curves
-    // Creates smooth curves passing through p1 and p2, using p0 and p3 for slope
-    const float t2 = t * t;
-    const float t3 = t2 * t;
-
-    const float x = 0.5f * (
-        (2.0f * p1.x) +
-        (-p0.x + p2.x) * t +
-        (2.0f * p0.x - 5.0f * p1.x + 4.0f * p2.x - p3.x) * t2 +
-        (-p0.x + 3.0f * p1.x - 3.0f * p2.x + p3.x) * t3
-    );
-
-    const float y = 0.5f * (
-        (2.0f * p1.y) +
-        (-p0.y + p2.y) * t +
-        (2.0f * p0.y - 5.0f * p1.y + 4.0f * p2.y - p3.y) * t2 +
-        (-p0.y + 3.0f * p1.y - 3.0f * p2.y + p3.y) * t3
-    );
-
-    return {x, y};
-}
-
-void WaveformDisplay::paint(juce::Graphics& g)
-{
-    // Only render if decimated display is ready
-    if (!processor.decimatedDisplayReady.load())
-        return;
-
-    const auto bounds = getLocalBounds().toFloat();
-    const float width = bounds.getWidth();
-    const float height = bounds.getHeight();
-    const float centerY = height * 0.5f;
-
-    // Background
-    g.fillAll(juce::Colour(0xff1a1a1a));
-
-    // Grid lines
-    g.setColour(juce::Colour(0xff2a2a2a));
-    // Center line
-    g.drawHorizontalLine(static_cast<int>(centerY), 0.0f, width);
-    // ±6dB lines (at ±50% of height with zoom)
-    const float dbLineOffset = height * 0.25f / verticalZoom;
-    g.drawHorizontalLine(static_cast<int>(centerY - dbLineOffset), 0.0f, width);
-    g.drawHorizontalLine(static_cast<int>(centerY + dbLineOffset), 0.0f, width);
-
-    // === WAVEFORM RENDERING WITH MIN/MAX ENVELOPE ===
-    const int numSegments = processor.decimatedDisplaySize;
-    const float pixelsPerSegment = width / static_cast<float>(numSegments);
-
-    // Create path for waveform envelope
-    juce::Path waveformPath;
-    bool pathStarted = false;
-
-    // Render waveform as min/max envelope for accurate peak representation
-    for (int i = 0; i < numSegments; ++i)
-    {
-        const auto& segment = processor.decimatedDisplay[i];
-        const float x = static_cast<float>(i) * pixelsPerSegment;
-
-        // Convert amplitude to screen coordinates (with vertical zoom)
-        const float yMax = centerY - (segment.waveformMax * centerY * verticalZoom);
-        const float yMin = centerY - (segment.waveformMin * centerY * verticalZoom);
-
-        // Create filled envelope (top edge)
-        if (!pathStarted)
-        {
-            waveformPath.startNewSubPath(x, yMax);
-            pathStarted = true;
-        }
-        else
-        {
-            waveformPath.lineTo(x, yMax);
-        }
-    }
-
-    // Add bottom edge (reverse direction for filled path)
-    for (int i = numSegments - 1; i >= 0; --i)
-    {
-        const auto& segment = processor.decimatedDisplay[i];
-        const float x = static_cast<float>(i) * pixelsPerSegment;
-        const float yMin = centerY - (segment.waveformMin * centerY * verticalZoom);
-        waveformPath.lineTo(x, yMin);
-    }
-
-    waveformPath.closeSubPath();
-
-    // Fill waveform envelope with semi-transparent white
-    g.setColour(juce::Colour(0x80ffffff));
-    g.fillPath(waveformPath);
-
-    // === RGB FREQUENCY BAND COLORING ===
-    // Render RGB-colored segments based on dominant frequency band
-    for (int i = 0; i < numSegments; ++i)
-    {
-        const auto& segment = processor.decimatedDisplay[i];
-        const float x = static_cast<float>(i) * pixelsPerSegment;
-
-        // Normalize frequency bands to 0-1 range
-        const float totalEnergy = segment.avgLow + segment.avgMid + segment.avgHigh;
-        if (totalEnergy < 1e-6f)
-            continue;
-
-        const float lowNorm = segment.avgLow / totalEnergy;
-        const float midNorm = segment.avgMid / totalEnergy;
-        const float highNorm = segment.avgHigh / totalEnergy;
-
-        // Create RGB color based on frequency content
-        const juce::Colour freqColor(
-            static_cast<uint8_t>(lowNorm * 255),   // Red = low frequencies
-            static_cast<uint8_t>(midNorm * 255),   // Green = mid frequencies
-            static_cast<uint8_t>(highNorm * 255)   // Blue = high frequencies
-        );
-
-        // Draw colored bar at bottom of display
-        g.setColour(freqColor.withAlpha(0.5f));
-        g.fillRect(x, height - 20.0f, pixelsPerSegment, 20.0f);
-    }
-
-    // === GAIN REDUCTION TRACE (Synced with waveform) ===
-    if (showGainReduction)
-    {
-        juce::Path grPath;
-        bool grPathStarted = false;
-
-        const float grMaxHeight = height * grTraceHeight;
-
-        for (int i = 0; i < numSegments; ++i)
-        {
-            const auto& segment = processor.decimatedDisplay[i];
-            const float x = static_cast<float>(i) * pixelsPerSegment;
-
-            // Convert GR (in dB) to screen height (0 dB = no trace, higher dB = taller)
-            // Use max GR for this segment to show peaks
-            const float grDB = segment.grMax;
-            const float grHeight = std::min(grDB * 10.0f, grMaxHeight);  // 10 pixels per dB
-            const float y = grHeight;
-
-            if (!grPathStarted)
-            {
-                grPath.startNewSubPath(x, y);
-                grPathStarted = true;
-            }
-            else
-            {
-                grPath.lineTo(x, y);
-            }
-        }
-
-        // Draw GR trace with orange color (FabFilter style)
-        g.setColour(juce::Colour(0xffff8800).withAlpha(0.8f));
-        g.strokePath(grPath, juce::PathStrokeType(2.0f));
-    }
-
-    // === BORDER ===
-    g.setColour(juce::Colour(0xff404040));
-    g.drawRect(bounds, 1.0f);
-}
-
 //==============================================================================
 // XYPad Implementation
 //==============================================================================
@@ -805,6 +619,174 @@ void XYPad::updateParameters(juce::Point<float> position)
 //==============================================================================
 // Advanced Panel Implementation
 //==============================================================================
+// =============================================================================
+// Calibration Panel Implementation
+// =============================================================================
+
+CalibrationPanel::CalibrationPanel(juce::AudioProcessorValueTreeState& apvts, QuadBlendDriveAudioProcessor& processor)
+    : apvts(apvts), processor(processor)
+{
+    // Calibration Level Slider
+    calibLevelSlider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+    calibLevelSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 50, 18);
+    calibLevelSlider.setDoubleClickReturnValue(true, 0.0);
+    addAndMakeVisible(calibLevelSlider);
+
+    calibLevelLabel.setText("Calib", juce::dontSendNotification);
+    calibLevelLabel.setJustificationType(juce::Justification::centred);
+    calibLevelLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.75f));
+    addAndMakeVisible(calibLevelLabel);
+
+    // Analyze Button
+    analyzeButton.setButtonText("ANALYZE");
+    analyzeButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
+    analyzeButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
+    analyzeButton.onClick = [this, &proc = this->processor]()
+    {
+        if (proc.isAnalyzing.load())
+        {
+            proc.stopAnalysis();
+            analyzeButton.setButtonText("ANALYZE");
+        }
+        else
+        {
+            proc.startAnalysis();
+            analyzeButton.setButtonText("STOP");
+        }
+    };
+    addAndMakeVisible(analyzeButton);
+
+    // Normalize Button
+    normalizeButton.setButtonText("NORMALIZE");
+    normalizeButton.setClickingTogglesState(true);
+    normalizeButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
+    normalizeButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(255, 120, 50));
+    normalizeButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
+    normalizeButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+    normalizeButton.onClick = [this, &proc = this->processor]()
+    {
+        if (normalizeButton.getToggleState())
+            proc.enableNormalization();
+        else
+            proc.disableNormalization();
+    };
+    addAndMakeVisible(normalizeButton);
+
+    // Reset Button
+    resetNormButton.setButtonText("RESET");
+    resetNormButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
+    resetNormButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
+    resetNormButton.onClick = [this, &proc = this->processor]()
+    {
+        proc.resetNormalizationData();
+        normalizeButton.setToggleState(false, juce::dontSendNotification);
+        analyzeButton.setButtonText("ANALYZE");
+    };
+    addAndMakeVisible(resetNormButton);
+
+    // Input Peak Label
+    inputPeakLabel.setText("INPUT PEAK: -- dB", juce::dontSendNotification);
+    inputPeakLabel.setJustificationType(juce::Justification::centred);
+    inputPeakLabel.setColour(juce::Label::backgroundColourId, juce::Colour(28, 28, 32));
+    inputPeakLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.9f));
+    inputPeakLabel.setColour(juce::Label::outlineColourId, juce::Colour(60, 60, 65).withAlpha(0.3f));
+    addAndMakeVisible(inputPeakLabel);
+
+    // Gain Applied Label
+    gainAppliedLabel.setText("GAIN APPLIED:", juce::dontSendNotification);
+    gainAppliedLabel.setJustificationType(juce::Justification::centredLeft);
+    gainAppliedLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.75f));
+    addAndMakeVisible(gainAppliedLabel);
+
+    // Gain Applied Value (copyable)
+    gainAppliedValue.setText("-- dB");
+    gainAppliedValue.setReadOnly(true);
+    gainAppliedValue.setCaretVisible(false);
+    gainAppliedValue.setScrollbarsShown(false);
+    gainAppliedValue.setJustification(juce::Justification::centredLeft);
+    gainAppliedValue.setColour(juce::TextEditor::backgroundColourId, juce::Colour(28, 28, 32));
+    gainAppliedValue.setColour(juce::TextEditor::textColourId, juce::Colours::white.withAlpha(0.9f));
+    gainAppliedValue.setColour(juce::TextEditor::outlineColourId, juce::Colour(60, 60, 65).withAlpha(0.3f));
+    gainAppliedValue.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colour(255, 120, 50).withAlpha(0.5f));
+    addAndMakeVisible(gainAppliedValue);
+
+    // Create attachment
+    calibLevelAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "CALIB_LEVEL", calibLevelSlider);
+
+    // Start collapsed
+    setVisible(false);
+}
+
+void CalibrationPanel::paint(juce::Graphics& g)
+{
+    g.fillAll(juce::Colour(25, 25, 28));
+    g.setColour(juce::Colour(60, 60, 65).withAlpha(0.3f));
+    g.drawRect(getLocalBounds(), 1);
+}
+
+void CalibrationPanel::resized()
+{
+    auto bounds = getLocalBounds().reduced(10);
+
+    // Row 1: Calib Knob
+    auto row1 = bounds.removeFromTop(80);
+    calibLevelLabel.setBounds(row1.removeFromTop(15));
+    calibLevelSlider.setBounds(row1);
+    bounds.removeFromTop(10);
+
+    // Row 2: Buttons (20% wider than 50% size)
+    auto row2 = bounds.removeFromTop(25);
+    analyzeButton.setBounds(row2.removeFromLeft(48));  // 40 * 1.2
+    row2.removeFromLeft(5);
+    normalizeButton.setBounds(row2.removeFromLeft(58));  // 48 * 1.2
+    row2.removeFromLeft(5);
+    resetNormButton.setBounds(row2.removeFromLeft(40));  // 33 * 1.2
+    bounds.removeFromTop(10);
+
+    // Row 3: Input Peak
+    inputPeakLabel.setBounds(bounds.removeFromTop(25));
+    bounds.removeFromTop(5);
+
+    // Row 4: Gain Applied
+    auto row4 = bounds.removeFromTop(25);
+    gainAppliedLabel.setBounds(row4.removeFromLeft(95));
+    gainAppliedValue.setBounds(row4);
+}
+
+void CalibrationPanel::setVisible(bool shouldBeVisible)
+{
+    Component::setVisible(shouldBeVisible);
+    if (shouldBeVisible)
+    {
+        setSize(getWidth(), 200);  // Expanded height
+    }
+    else
+    {
+        setSize(getWidth(), 0);  // Collapsed height
+    }
+}
+
+void CalibrationPanel::updateInputPeakDisplay(double peakDB)
+{
+    if (peakDB > -60.0)
+        inputPeakLabel.setText("INPUT PEAK: " + juce::String(peakDB, 1) + " dB", juce::dontSendNotification);
+    else
+        inputPeakLabel.setText("INPUT PEAK: -- dB", juce::dontSendNotification);
+}
+
+void CalibrationPanel::updateGainAppliedDisplay(double gainDB)
+{
+    if (std::abs(gainDB) > 0.01)
+        gainAppliedValue.setText(juce::String(gainDB, 1) + " dB");
+    else
+        gainAppliedValue.setText("-- dB");
+}
+
+// =============================================================================
+// Advanced Panel Implementation
+// =============================================================================
+
 AdvancedPanel::AdvancedPanel(juce::AudioProcessorValueTreeState& apvts)
     : apvts(apvts)
 {
@@ -844,6 +826,25 @@ AdvancedPanel::AdvancedPanel(juce::AudioProcessorValueTreeState& apvts)
     addAndMakeVisible(limitRelLabel);
     limitRelAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "LIMIT_REL", limitRelSlider);
 
+    slLimitAttackSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    slLimitAttackSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 22);
+    addAndMakeVisible(slLimitAttackSlider);
+    slLimitAttackLabel.setText("Attack Time:", juce::dontSendNotification);
+    slLimitAttackLabel.setFont(juce::Font(10.0f));
+    slLimitAttackLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.8f));
+    addAndMakeVisible(slLimitAttackLabel);
+    slLimitAttackAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "SL_LIMIT_ATTACK", slLimitAttackSlider);
+
+    // Fast Limiter controls
+    flLimitAttackSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    flLimitAttackSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 22);
+    addAndMakeVisible(flLimitAttackSlider);
+    flLimitAttackLabel.setText("FL Attack Time:", juce::dontSendNotification);
+    flLimitAttackLabel.setFont(juce::Font(10.0f));
+    flLimitAttackLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.8f));
+    addAndMakeVisible(flLimitAttackLabel);
+    flLimitAttackAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "FL_LIMIT_ATTACK", flLimitAttackSlider);
+
     // Gain Compensation controls
     hcCompButton.setButtonText("Hard");
     hcCompButton.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
@@ -864,6 +865,50 @@ AdvancedPanel::AdvancedPanel(juce::AudioProcessorValueTreeState& apvts)
     flCompButton.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
     addAndMakeVisible(flCompButton);
     flCompAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(apvts, "FL_COMP", flCompButton);
+
+    // === ENVELOPE SHAPING CONTROLS ===
+    envelopeLabel.setText("ENVELOPE SHAPING (TRANSIENT/SUSTAIN)", juce::dontSendNotification);
+    envelopeLabel.setFont(juce::Font(10.0f, juce::Font::bold));
+    envelopeLabel.setColour(juce::Label::textColourId, juce::Colour(180, 180, 190));
+    addAndMakeVisible(envelopeLabel);
+
+    // Helper lambda to setup envelope sliders
+    auto setupEnvelopeSlider = [this](juce::Slider& slider, juce::Label& label, const juce::String& text) {
+        slider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+        slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 50, 18);
+        slider.setDoubleClickReturnValue(true, 0.0);  // Double-click resets to 0 dB
+        addAndMakeVisible(slider);
+
+        label.setText(text, juce::dontSendNotification);
+        label.setFont(juce::Font(9.0f));
+        label.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.7f));
+        label.setJustificationType(juce::Justification::centred);
+        addAndMakeVisible(label);
+    };
+
+    // Hard Clip
+    setupEnvelopeSlider(hcAttackSlider, hcAttackLabel, "HC ATK");
+    setupEnvelopeSlider(hcSustainSlider, hcSustainLabel, "HC SUS");
+    hcAttackAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "HC_ATTACK", hcAttackSlider);
+    hcSustainAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "HC_SUSTAIN", hcSustainSlider);
+
+    // Soft Clip
+    setupEnvelopeSlider(scAttackSlider, scAttackLabel, "SC ATK");
+    setupEnvelopeSlider(scSustainSlider, scSustainLabel, "SC SUS");
+    scAttackAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "SC_ATTACK", scAttackSlider);
+    scSustainAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "SC_SUSTAIN", scSustainSlider);
+
+    // Slow Limit
+    setupEnvelopeSlider(slAttackSlider, slAttackLabel, "SL ATK");
+    setupEnvelopeSlider(slSustainSlider, slSustainLabel, "SL SUS");
+    slAttackAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "SL_ATTACK", slAttackSlider);
+    slSustainAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "SL_SUSTAIN", slSustainSlider);
+
+    // Fast Limit
+    setupEnvelopeSlider(flAttackSlider, flAttackLabel, "FL ATK");
+    setupEnvelopeSlider(flSustainSlider, flSustainLabel, "FL SUS");
+    flAttackAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "FL_ATTACK", flAttackSlider);
+    flSustainAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "FL_SUSTAIN", flSustainSlider);
 
     setVisible(false);  // Start hidden
 }
@@ -886,33 +931,124 @@ void AdvancedPanel::paint(juce::Graphics& g)
 void AdvancedPanel::resized()
 {
     auto bounds = getLocalBounds().reduced(12);
-    int yPos = 12;
-    const int rowHeight = 26;
-    const int sectionGap = 12;
-    const int labelWidth = 110;
-    const int sliderWidth = 280;  // Increased to 280 (track + 60px text box)
 
-    // Soft Clip section
-    softClipLabel.setBounds(bounds.getX(), yPos, bounds.getWidth(), 16);
-    yPos += 22;
-    scKneeLabel.setBounds(bounds.getX(), yPos, labelWidth, rowHeight);
-    scKneeSlider.setBounds(bounds.getX() + labelWidth, yPos, sliderWidth, rowHeight);
-    yPos += rowHeight + sectionGap;
+    // Use two-column layout with better spacing
+    const int columnGap = 15;
+    const int halfWidth = (bounds.getWidth() - columnGap) / 2;
+    auto leftColumn = bounds.removeFromLeft(halfWidth);
+    bounds.removeFromLeft(columnGap);
+    auto rightColumn = bounds;
 
-    // Slow Limiter section
-    limitersLabel.setBounds(bounds.getX(), yPos, bounds.getWidth(), 16);
-    yPos += 22;
-    limitRelLabel.setBounds(bounds.getX(), yPos, labelWidth, rowHeight);
-    limitRelSlider.setBounds(bounds.getX() + labelWidth, yPos, sliderWidth, rowHeight);
-    yPos += rowHeight + sectionGap;
+    const int rowHeight = 22;
+    const int sectionGap = 10;
+    const int headerHeight = 16;
+    const int labelWidth = 95;
+    const int sliderWidth = 150;
 
-    // Gain Compensation section
-    compLabel.setBounds(bounds.getX(), yPos, bounds.getWidth(), 16);
-    yPos += 22;
-    hcCompButton.setBounds(bounds.getX(), yPos, 70, rowHeight);
-    scCompButton.setBounds(bounds.getX() + 80, yPos, 70, rowHeight);
-    slCompButton.setBounds(bounds.getX() + 160, yPos, 70, rowHeight);
-    flCompButton.setBounds(bounds.getX() + 240, yPos, 70, rowHeight);
+    // ========== LEFT COLUMN ==========
+    int yPosLeft = 0;
+
+    // === SOFT CLIP SECTION ===
+    softClipLabel.setBounds(leftColumn.getX(), yPosLeft, leftColumn.getWidth(), headerHeight);
+    yPosLeft += headerHeight + 8;
+
+    scKneeLabel.setBounds(leftColumn.getX(), yPosLeft, labelWidth, rowHeight);
+    scKneeSlider.setBounds(leftColumn.getX() + labelWidth, yPosLeft, sliderWidth, rowHeight);
+    yPosLeft += rowHeight + sectionGap;
+
+    // === LIMITERS SECTION ===
+    limitersLabel.setBounds(leftColumn.getX(), yPosLeft, leftColumn.getWidth(), headerHeight);
+    yPosLeft += headerHeight + 8;
+
+    limitRelLabel.setBounds(leftColumn.getX(), yPosLeft, labelWidth, rowHeight);
+    limitRelSlider.setBounds(leftColumn.getX() + labelWidth, yPosLeft, sliderWidth, rowHeight);
+    yPosLeft += rowHeight + 4;
+
+    slLimitAttackLabel.setBounds(leftColumn.getX(), yPosLeft, labelWidth, rowHeight);
+    slLimitAttackSlider.setBounds(leftColumn.getX() + labelWidth, yPosLeft, sliderWidth, rowHeight);
+    yPosLeft += rowHeight + 4;
+
+    flLimitAttackLabel.setBounds(leftColumn.getX(), yPosLeft, labelWidth, rowHeight);
+    flLimitAttackSlider.setBounds(leftColumn.getX() + labelWidth, yPosLeft, sliderWidth, rowHeight);
+    yPosLeft += rowHeight + sectionGap;
+
+    // === GAIN COMPENSATION SECTION ===
+    compLabel.setBounds(leftColumn.getX(), yPosLeft, leftColumn.getWidth(), headerHeight);
+    yPosLeft += headerHeight + 8;
+
+    // Vertical 2x2 grid for better clarity
+    const int compButtonWidth = 55;
+    const int compButtonHeight = 22;
+    const int compGap = 6;
+
+    // Top row: HC and SC
+    int xPosComp = leftColumn.getX();
+    hcCompButton.setBounds(xPosComp, yPosLeft, compButtonWidth, compButtonHeight);
+    xPosComp += compButtonWidth + compGap;
+    scCompButton.setBounds(xPosComp, yPosLeft, compButtonWidth, compButtonHeight);
+
+    yPosLeft += compButtonHeight + compGap;
+
+    // Bottom row: SL and FL
+    xPosComp = leftColumn.getX();
+    slCompButton.setBounds(xPosComp, yPosLeft, compButtonWidth, compButtonHeight);
+    xPosComp += compButtonWidth + compGap;
+    flCompButton.setBounds(xPosComp, yPosLeft, compButtonWidth, compButtonHeight);
+
+    // ========== RIGHT COLUMN - ENVELOPE SHAPING ==========
+    int yPosRight = 0;
+
+    envelopeLabel.setBounds(rightColumn.getX(), yPosRight, rightColumn.getWidth(), headerHeight);
+    yPosRight += headerHeight + 8;
+
+    // Envelope layout in 2x2 grid matching XY pad layout:
+    // Row 1: HC (top-left) | FL (top-right)
+    // Row 2: SC (bottom-left) | SL (bottom-right)
+    const int knobSize = 36;
+    const int knobSpacing = 8;
+    const int envLabelWidth = 30;
+    const int labelToKnobGap = 5;
+    const int envColumnGap = 12;
+    const int rowGap = 10;
+
+    const int envHalfWidth = (rightColumn.getWidth() - envColumnGap) / 2;
+
+    // Row 1: HC (left) and FL (right)
+    int currentY = yPosRight;
+
+    // HC (Top-Left)
+    int xPosEnv = rightColumn.getX();
+    hcAttackLabel.setBounds(xPosEnv, currentY, envLabelWidth, 14);
+    hcAttackSlider.setBounds(xPosEnv + envLabelWidth + labelToKnobGap, currentY, knobSize, knobSize + 16);
+    hcSustainSlider.setBounds(xPosEnv + envLabelWidth + labelToKnobGap + knobSize + knobSpacing, currentY, knobSize, knobSize + 16);
+
+    // FL (Top-Right)
+    xPosEnv = rightColumn.getX() + envHalfWidth + envColumnGap;
+    flAttackLabel.setBounds(xPosEnv, currentY, envLabelWidth, 14);
+    flAttackSlider.setBounds(xPosEnv + envLabelWidth + labelToKnobGap, currentY, knobSize, knobSize + 16);
+    flSustainSlider.setBounds(xPosEnv + envLabelWidth + labelToKnobGap + knobSize + knobSpacing, currentY, knobSize, knobSize + 16);
+
+    currentY += knobSize + 16 + rowGap;
+
+    // Row 2: SC (left) and SL (right)
+
+    // SC (Bottom-Left)
+    xPosEnv = rightColumn.getX();
+    scAttackLabel.setBounds(xPosEnv, currentY, envLabelWidth, 14);
+    scAttackSlider.setBounds(xPosEnv + envLabelWidth + labelToKnobGap, currentY, knobSize, knobSize + 16);
+    scSustainSlider.setBounds(xPosEnv + envLabelWidth + labelToKnobGap + knobSize + knobSpacing, currentY, knobSize, knobSize + 16);
+
+    // SL (Bottom-Right)
+    xPosEnv = rightColumn.getX() + envHalfWidth + envColumnGap;
+    slAttackLabel.setBounds(xPosEnv, currentY, envLabelWidth, 14);
+    slAttackSlider.setBounds(xPosEnv + envLabelWidth + labelToKnobGap, currentY, knobSize, knobSize + 16);
+    slSustainSlider.setBounds(xPosEnv + envLabelWidth + labelToKnobGap + knobSize + knobSpacing, currentY, knobSize, knobSize + 16);
+
+    // Hide sustain labels (using attack label for both columns)
+    hcSustainLabel.setBounds(0, 0, 0, 0);
+    scSustainLabel.setBounds(0, 0, 0, 0);
+    slSustainLabel.setBounds(0, 0, 0, 0);
+    flSustainLabel.setBounds(0, 0, 0, 0);
 }
 
 void AdvancedPanel::setVisible(bool shouldBeVisible)
@@ -927,22 +1063,53 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     : AudioProcessorEditor(&p),
       audioProcessor(p),
       xyPad(p.apvts, "XY_X_PARAM", "XY_Y_PARAM", p),
+      calibrationPanel(p.apvts, p),
       advancedPanel(p.apvts),
       oscilloscope(p),
-      masterMeter(p),
-      waveformDisplay(p)
+      transferCurveMeter(p),  // Transfer curve with level meter
+      inputMeter(p, true),    // Stereo input meter
+      outputMeter(p, false)   // Stereo output meter
 {
-    setSize(850, 900);  // Default size
+    // Apply custom look and feel
+    setLookAndFeel(&lookAndFeel);
+
+    setSize(950, 850);  // Default size
     setResizable(true, true);
-    setResizeLimits(800, 600, 1700, 1800);  // Min 800x600, Max 2x default size
+    setResizeLimits(800, 600, 1900, 1700);  // Min 800x600, Max 2x default size
 
     // Setup XY Pad
     addAndMakeVisible(xyPad);
 
-    // Setup Visualizations (these go first so Advanced Panel can overlay)
+    // Setup Visualizations (these go first so panels can overlay)
     addAndMakeVisible(oscilloscope);
-    addAndMakeVisible(masterMeter);
-    addAndMakeVisible(waveformDisplay);
+    addChildComponent(transferCurveMeter);  // Transfer curve with level meter (hidden by default)
+    addAndMakeVisible(inputMeter);          // Stereo input meter
+    addAndMakeVisible(outputMeter);         // Stereo output meter
+
+    // Setup Transfer Curve Toggle Button
+    transferCurveToggleButton.setButtonText("TRANSFER CURVE");
+    transferCurveToggleButton.setClickingTogglesState(false);
+    transferCurveToggleButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
+    transferCurveToggleButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
+    transferCurveToggleButton.onClick = [this]() {
+        transferCurveMeter.setVisible(!transferCurveMeter.isVisible());
+        resized();  // Re-layout when panel visibility changes
+    };
+    addAndMakeVisible(transferCurveToggleButton);
+
+    // Setup Calibration Panel
+    calibrationToggleButton.setButtonText("CALIBRATION");
+    calibrationToggleButton.setClickingTogglesState(false);
+    calibrationToggleButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
+    calibrationToggleButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
+    addAndMakeVisible(calibrationToggleButton);
+
+    calibrationToggleButton.onClick = [this]() {
+        calibrationPanel.setVisible(!calibrationPanel.isVisible());
+        resized();  // Re-layout when panel visibility changes
+    };
+    // Note: Button text and colors are dynamically updated in timerCallback() based on normalization state
+    // CalibrationPanel added at end of constructor to appear on top
 
     // Setup Advanced Panel (added AFTER waveform so it appears on top)
     advancedToggleButton.setButtonText("ADVANCED");
@@ -952,7 +1119,7 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
         resized();  // Re-layout when panel visibility changes
     };
     addAndMakeVisible(advancedToggleButton);
-    addAndMakeVisible(advancedPanel);
+    addChildComponent(advancedPanel);  // Use addChildComponent to keep panel hidden initially
 
     // Setup Sliders - Global Controls (proportional sizing)
     auto setupRotarySlider = [this](juce::Slider& slider, juce::Label& label, const juce::String& text)
@@ -972,54 +1139,18 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     setupRotarySlider(outputGainSlider, outputGainLabel, "Output");
     setupRotarySlider(mixSlider, mixLabel, "Mix");
 
-    // Calibration/Threshold Control
-    setupRotarySlider(calibLevelSlider, calibLevelLabel, "Calib");
+    // Threshold Control (Calib moved to CalibrationPanel)
     setupRotarySlider(thresholdSlider, thresholdLabel, "Thresh");
 
-    // Normalization Buttons - Modern styling
-    analyzeButton.setButtonText("ANALYZE");
-    analyzeButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
-    analyzeButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
-    analyzeButton.onClick = [this]()
-    {
-        if (audioProcessor.isAnalyzing.load())
-        {
-            audioProcessor.stopAnalysis();
-            analyzeButton.setButtonText("ANALYZE");
-        }
-        else
-        {
-            audioProcessor.startAnalysis();
-            analyzeButton.setButtonText("STOP");
-        }
-    };
-    addAndMakeVisible(analyzeButton);
-
-    normalizeButton.setButtonText("NORMALIZE");
-    normalizeButton.setClickingTogglesState(true);
-    normalizeButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
-    normalizeButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(255, 120, 50));
-    normalizeButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
-    normalizeButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
-    normalizeButton.onClick = [this]()
-    {
-        if (normalizeButton.getToggleState())
-            audioProcessor.enableNormalization();
-        else
-            audioProcessor.disableNormalization();
-    };
-    addAndMakeVisible(normalizeButton);
-
-    resetNormButton.setButtonText("RESET");
-    resetNormButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
-    resetNormButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
-    resetNormButton.onClick = [this]()
-    {
-        audioProcessor.resetNormalizationData();
-        normalizeButton.setToggleState(false, juce::dontSendNotification);
-        analyzeButton.setButtonText("ANALYZE");
-    };
-    addAndMakeVisible(resetNormButton);
+    // Threshold Link Button - Toggle between automatic tracking and manual control
+    thresholdLinkButton.setButtonText("LINK");
+    thresholdLinkButton.setClickingTogglesState(true);
+    thresholdLinkButton.setToggleState(true, juce::dontSendNotification);  // Default ON
+    thresholdLinkButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
+    thresholdLinkButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(50, 150, 255));  // Blue when linked
+    thresholdLinkButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.6f));
+    thresholdLinkButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+    addAndMakeVisible(thresholdLinkButton);
 
     // Gain Link Toggle - Consistent button styling
     gainLinkButton.setButtonText("LINK I/O");
@@ -1055,32 +1186,7 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     };
     addAndMakeVisible(resetTrimsButton);
 
-    // Normalization Display Labels - Modern styling
-    inputPeakLabel.setText("INPUT PEAK: -- dB", juce::dontSendNotification);
-    inputPeakLabel.setJustificationType(juce::Justification::centred);
-    inputPeakLabel.setColour(juce::Label::backgroundColourId, juce::Colour(28, 28, 32));
-    inputPeakLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.9f));
-    inputPeakLabel.setColour(juce::Label::outlineColourId, juce::Colour(60, 60, 65).withAlpha(0.3f));
-    addAndMakeVisible(inputPeakLabel);
-
-    // Gain Applied - label and copyable value
-    gainAppliedLabel.setText("GAIN APPLIED:", juce::dontSendNotification);
-    gainAppliedLabel.setJustificationType(juce::Justification::centredLeft);
-    gainAppliedLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.75f));
-    addAndMakeVisible(gainAppliedLabel);
-
-    gainAppliedValue.setText("-- dB");
-    gainAppliedValue.setReadOnly(true);
-    gainAppliedValue.setCaretVisible(false);
-    gainAppliedValue.setScrollbarsShown(false);
-    gainAppliedValue.setJustification(juce::Justification::centredLeft);
-    gainAppliedValue.setColour(juce::TextEditor::backgroundColourId, juce::Colour(28, 28, 32));
-    gainAppliedValue.setColour(juce::TextEditor::textColourId, juce::Colours::white.withAlpha(0.9f));
-    gainAppliedValue.setColour(juce::TextEditor::outlineColourId, juce::Colour(60, 60, 65).withAlpha(0.3f));
-    gainAppliedValue.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colour(255, 120, 50).withAlpha(0.5f));
-    addAndMakeVisible(gainAppliedValue);
-
-    // Start timer for updating normalization display
+    // Start timer for updating normalization display (now in CalibrationPanel)
     startTimerHz(10);  // 10 Hz update rate
 
     // Setup Trim Sliders (proportional to main knobs)
@@ -1153,11 +1259,10 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
         button.setButtonText("M");
         button.setClickingTogglesState(true);
         // OFF state (not muted): subtle dark background
-        button.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
-        button.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.5f));
-        // ON state (muted): red with modern styling
-        button.setColour(juce::TextButton::buttonOnColourId, juce::Colour(220, 50, 50));
-        button.setColour(juce::TextButton::textColourOnId, juce::Colours::white.withAlpha(0.95f));
+        button.setColour(juce::ToggleButton::textColourId, juce::Colours::white.withAlpha(0.5f));
+        // ON state (muted): orange with modern styling
+        button.setColour(juce::ToggleButton::tickColourId, juce::Colour(255, 140, 0));  // Orange
+        button.setColour(juce::ToggleButton::tickDisabledColourId, juce::Colour(255, 140, 0));
     };
 
     setupMuteButton(hcMuteButton);
@@ -1169,6 +1274,57 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     addAndMakeVisible(scMuteButton);
     addAndMakeVisible(slMuteButton);
     addAndMakeVisible(flMuteButton);
+
+    // Solo Buttons - Modern styling with yellow/gold accent
+    auto setupSoloButton = [](juce::ToggleButton& button)
+    {
+        button.setButtonText("S");
+        // OFF state (not soloed): subtle dark background
+        button.setColour(juce::ToggleButton::textColourId, juce::Colours::white.withAlpha(0.5f));
+        // ON state (soloed): gold/yellow with modern styling
+        button.setColour(juce::ToggleButton::tickColourId, juce::Colour(255, 200, 50));
+        button.setColour(juce::ToggleButton::tickDisabledColourId, juce::Colour(255, 200, 50));
+    };
+
+    setupSoloButton(hcSoloButton);
+    setupSoloButton(scSoloButton);
+    setupSoloButton(slSoloButton);
+    setupSoloButton(flSoloButton);
+
+    // Make solo buttons mutually exclusive (radio button behavior)
+    hcSoloButton.onClick = [this]() {
+        if (hcSoloButton.getToggleState()) {
+            scSoloButton.setToggleState(false, juce::sendNotification);
+            slSoloButton.setToggleState(false, juce::sendNotification);
+            flSoloButton.setToggleState(false, juce::sendNotification);
+        }
+    };
+    scSoloButton.onClick = [this]() {
+        if (scSoloButton.getToggleState()) {
+            hcSoloButton.setToggleState(false, juce::sendNotification);
+            slSoloButton.setToggleState(false, juce::sendNotification);
+            flSoloButton.setToggleState(false, juce::sendNotification);
+        }
+    };
+    slSoloButton.onClick = [this]() {
+        if (slSoloButton.getToggleState()) {
+            hcSoloButton.setToggleState(false, juce::sendNotification);
+            scSoloButton.setToggleState(false, juce::sendNotification);
+            flSoloButton.setToggleState(false, juce::sendNotification);
+        }
+    };
+    flSoloButton.onClick = [this]() {
+        if (flSoloButton.getToggleState()) {
+            hcSoloButton.setToggleState(false, juce::sendNotification);
+            scSoloButton.setToggleState(false, juce::sendNotification);
+            slSoloButton.setToggleState(false, juce::sendNotification);
+        }
+    };
+
+    addAndMakeVisible(hcSoloButton);
+    addAndMakeVisible(scSoloButton);
+    addAndMakeVisible(slSoloButton);
+    addAndMakeVisible(flSoloButton);
 
     // === SIMPLIFIED OUTPUT LIMITER CONTROLS ===
 
@@ -1254,10 +1410,10 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
         p.apvts, "OUTPUT_GAIN", outputGainSlider);
     mixAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         p.apvts, "MIX_WET", mixSlider);
-    calibLevelAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        p.apvts, "CALIB_LEVEL", calibLevelSlider);
     thresholdAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         p.apvts, "THRESHOLD", thresholdSlider);
+    thresholdLinkAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        p.apvts, "THRESHOLD_LINK", thresholdLinkButton);
 
     hcTrimAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         p.apvts, "HC_TRIM", hcTrimSlider);
@@ -1276,6 +1432,16 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
         p.apvts, "SL_MUTE", slMuteButton);
     flMuteAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         p.apvts, "FL_MUTE", flMuteButton);
+
+    hcSoloAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        p.apvts, "HC_SOLO", hcSoloButton);
+    scSoloAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        p.apvts, "SC_SOLO", scSoloButton);
+    slSoloAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        p.apvts, "SL_SOLO", slSoloButton);
+    flSoloAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        p.apvts, "FL_SOLO", flSoloButton);
+
     deltaModeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         p.apvts, "DELTA_MODE", deltaModeButton);
     // O/S Delta attachment removed - functionality integrated into main delta mode
@@ -1302,29 +1468,70 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     bool deltaModeOn = p.apvts.getRawParameterValue("DELTA_MODE")->load() > 0.5f;
     if (auto* masterCompParam = p.apvts.getParameter("MASTER_COMP"))
         masterCompParam->setValueNotifyingHost(deltaModeOn ? 1.0f : 0.0f);
+
+    // Add CalibrationPanel LAST so it appears on top of all other controls
+    addChildComponent(calibrationPanel);  // Use addChildComponent to keep panel hidden initially
 }
 
 QuadBlendDriveAudioProcessorEditor::~QuadBlendDriveAudioProcessorEditor()
 {
     stopTimer();
+    setLookAndFeel(nullptr);
 }
 
 void QuadBlendDriveAudioProcessorEditor::timerCallback()
 {
-    // Update normalization display labels
+    // Update normalization display labels in CalibrationPanel
     double peakDB = audioProcessor.currentPeakDB.load();
     double gainDB = audioProcessor.normalizationGainDB.load();
 
-    if (peakDB > -60.0)
-        inputPeakLabel.setText("INPUT PEAK: " + juce::String(peakDB, 1) + " dB", juce::dontSendNotification);
-    else
-        inputPeakLabel.setText("INPUT PEAK: -- dB", juce::dontSendNotification);
+    calibrationPanel.updateInputPeakDisplay(peakDB);
+    calibrationPanel.updateGainAppliedDisplay(gainDB);
 
-    // Update only the value, not the label
-    if (std::abs(gainDB) > 0.01)
-        gainAppliedValue.setText(juce::String(gainDB, 1) + " dB");
+    // Update calibration toggle button based on normalization state
+    // Visual feedback shows normalization status even when panel is collapsed
+    // Only lights up when Normalize button is actually toggled ON (not just when analyzed)
+    bool normalizationEnabled = calibrationPanel.isNormalizationEnabled();
+    if (normalizationEnabled)
+    {
+        // NORMALIZATION ON: Active/lit state with bright accent color and indicator
+        calibrationToggleButton.setButtonText("● CALIBRATION");  // Indicator dot
+        calibrationToggleButton.setColour(juce::TextButton::buttonColourId, juce::Colour(255, 140, 60));  // Bright orange (lit)
+        calibrationToggleButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    }
     else
-        gainAppliedValue.setText("-- dB");
+    {
+        // NORMALIZATION OFF: Default/unlit state
+        calibrationToggleButton.setButtonText("CALIBRATION");  // No indicator
+        calibrationToggleButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));  // Dark grey (unlit)
+        calibrationToggleButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
+    }
+
+    // === THRESHOLD LINK LOGIC ===
+    // When linked, threshold automatically tracks calibration level
+    bool thresholdLinked = thresholdLinkButton.getToggleState();
+    if (thresholdLinked)
+    {
+        // Automatically sync threshold with calibration level
+        float calibLevel = *audioProcessor.apvts.getRawParameterValue("CALIB_LEVEL");
+        float currentThreshold = *audioProcessor.apvts.getRawParameterValue("THRESHOLD");
+
+        // Only update if there's a meaningful difference (avoid constant updates)
+        if (std::abs(currentThreshold - calibLevel) > 0.05f)
+        {
+            thresholdSlider.setValue(calibLevel, juce::dontSendNotification);
+            audioProcessor.apvts.getParameter("THRESHOLD")->setValueNotifyingHost(
+                audioProcessor.apvts.getParameter("THRESHOLD")->convertTo0to1(calibLevel));
+        }
+
+        // Visual feedback: Dim threshold slider when linked (shows it's automated)
+        thresholdSlider.setAlpha(0.6f);
+    }
+    else
+    {
+        // Manual mode: Full opacity
+        thresholdSlider.setAlpha(1.0f);
+    }
 }
 
 void QuadBlendDriveAudioProcessorEditor::paint(juce::Graphics& g)
@@ -1378,19 +1585,40 @@ void QuadBlendDriveAudioProcessorEditor::resized()
                           static_cast<int>(70 * scale),
                           static_cast<int>(16 * scale));
 
+    // Calibration Toggle Button in upper left corner
+    const int calibButtonWidth = static_cast<int>(100 * scale);
+    const int calibButtonHeight = static_cast<int>(25 * scale);
+    calibrationToggleButton.setBounds(static_cast<int>(10 * scale),
+                                     static_cast<int>(10 * scale),
+                                     calibButtonWidth,
+                                     calibButtonHeight);
+
+    // Calibration Panel - Below toggle button when expanded
+    if (calibrationPanel.isVisible())
+    {
+        const int panelWidth = static_cast<int>(250 * scale);
+        const int panelHeight = 200;
+        calibrationPanel.setBounds(static_cast<int>(10 * scale),
+                                  static_cast<int>(10 * scale) + calibButtonHeight + static_cast<int>(5 * scale),
+                                  panelWidth,
+                                  panelHeight);
+    }
+
     const int padding = static_cast<int>(20 * scale);
     const int knobSize = static_cast<int>(70 * scale);
     const int spacing = static_cast<int>(10 * scale);
 
-    // Reserve right edge for master meter (wider for better visibility)
-    const int masterMeterWidth = static_cast<int>(60 * scale);  // Increased from 35 to 60
-    auto masterMeterArea = bounds.removeFromRight(masterMeterWidth);
-    bounds.removeFromRight(spacing);  // Gap between meter and main content
-
-    // Reserve bottom for waveform display - FULL WIDTH (matches master meter height)
+    // Reserve bottom for waveform display FIRST - FULL WIDTH
     // Combined height: previous meterArea (120) + spacing (10) + oscilloscope (250) = 380 * scale
     auto oscilloscopeArea = bounds.removeFromBottom(static_cast<int>(380 * scale));
     bounds.removeFromBottom(spacing);
+
+    // Now reserve right edge for input/output meters (from remaining height)
+    const int meterWidth = static_cast<int>(49 * scale);  // 30% slimmer than before (70 * 0.7 = 49)
+    const int meterGap = static_cast<int>(8 * scale);
+    const int totalMeterWidth = (meterWidth * 2) + meterGap;  // Two meters plus gap
+    auto meterArea = bounds.removeFromRight(totalMeterWidth);
+    bounds.removeFromRight(spacing);  // Gap between meters and main content
 
     // Proportional three-column layout: LEFT (Input) | CENTER (XY) | RIGHT (Output)
     const int sideColumnWidth = static_cast<int>(300 * scale);
@@ -1405,45 +1633,12 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     inputGainSlider.setBounds(inputRow.removeFromLeft(knobSize));
     leftSection.removeFromTop(spacing);
 
-    // Calib Level
-    auto calibRow = leftSection.removeFromTop(knobSize);
-    calibLevelLabel.setBounds(calibRow.removeFromLeft(static_cast<int>(60 * scale)).removeFromTop(knobSize));
-    calibLevelSlider.setBounds(calibRow.removeFromLeft(knobSize));
-    leftSection.removeFromTop(spacing);
-
-    // Threshold
+    // Threshold (Calib controls moved to CalibrationPanel)
     auto threshRow = leftSection.removeFromTop(knobSize);
     thresholdLabel.setBounds(threshRow.removeFromLeft(static_cast<int>(60 * scale)).removeFromTop(knobSize));
     thresholdSlider.setBounds(threshRow.removeFromLeft(knobSize));
-    leftSection.removeFromTop(spacing);
-
-    // Calculate max width based on buttons below (Analyze + gap + Normalize + gap + Reset)
-    const int buttonRowWidth = static_cast<int>(68 * scale) + static_cast<int>(6 * scale) +
-                                 static_cast<int>(76 * scale) + static_cast<int>(6 * scale) +
-                                 static_cast<int>(58 * scale);
-
-    // Normalization displays - constrained to button width
-    auto normDisplays = leftSection.removeFromTop(static_cast<int>(56 * scale));
-    auto normDisplayArea = normDisplays.removeFromLeft(buttonRowWidth);
-
-    inputPeakLabel.setBounds(normDisplayArea.removeFromTop(static_cast<int>(26 * scale)));
-    normDisplayArea.removeFromTop(static_cast<int>(4 * scale));
-
-    // Gain applied - label and value side by side
-    auto gainRow = normDisplayArea.removeFromTop(static_cast<int>(26 * scale));
-    gainAppliedLabel.setBounds(gainRow.removeFromLeft(static_cast<int>(110 * scale)));
-    gainAppliedValue.setBounds(gainRow);
-
-    leftSection.removeFromTop(spacing);
-
-    // Normalization buttons (3 in a row)
-    auto normButtons = leftSection.removeFromTop(static_cast<int>(28 * scale));
-    analyzeButton.setBounds(normButtons.removeFromLeft(static_cast<int>(68 * scale)));
-    normButtons.removeFromLeft(static_cast<int>(6 * scale));
-    normalizeButton.setBounds(normButtons.removeFromLeft(static_cast<int>(76 * scale)));
-    normButtons.removeFromLeft(static_cast<int>(6 * scale));
-    resetNormButton.setBounds(normButtons.removeFromLeft(static_cast<int>(58 * scale)));
-
+    threshRow.removeFromLeft(spacing / 2);  // Small gap between knob and button
+    thresholdLinkButton.setBounds(threshRow.removeFromLeft(static_cast<int>(42 * scale)).withHeight(static_cast<int>(22 * scale)));
     leftSection.removeFromTop(spacing * 2);
 
     // 4 Processor Trims - [Label][Knob][Mute]
@@ -1454,36 +1649,44 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     const int trimLabelWidth = static_cast<int>(48 * scale);
     const int trimTopMargin = static_cast<int>(20 * scale);
 
-    // SL Trim - [Label][Knob][Mute] (Top-Left quadrant)
+    // SL Trim - [Label][Knob][Mute][Solo] (Top-Left quadrant)
     auto slRow = leftSection.removeFromTop(trimRowHeight);
     slTrimLabel.setBounds(slRow.removeFromLeft(trimLabelWidth).withTrimmedTop(trimTopMargin));
     slTrimSlider.setBounds(slRow.removeFromLeft(trimKnobSize));
     slRow.removeFromLeft(spacing);
     slMuteButton.setBounds(slRow.removeFromLeft(buttonSize).withTrimmedTop(trimTopMargin));
+    slRow.removeFromLeft(spacing / 2);  // Smaller spacing between M and S buttons
+    slSoloButton.setBounds(slRow.removeFromLeft(buttonSize).withTrimmedTop(trimTopMargin));
     leftSection.removeFromTop(spacing);
 
-    // SC Trim - [Label][Knob][Mute] (Bottom-Left quadrant)
+    // SC Trim - [Label][Knob][Mute][Solo] (Bottom-Left quadrant)
     auto scRow = leftSection.removeFromTop(trimRowHeight);
     scTrimLabel.setBounds(scRow.removeFromLeft(trimLabelWidth).withTrimmedTop(trimTopMargin));
     scTrimSlider.setBounds(scRow.removeFromLeft(trimKnobSize));
     scRow.removeFromLeft(spacing);
     scMuteButton.setBounds(scRow.removeFromLeft(buttonSize).withTrimmedTop(trimTopMargin));
+    scRow.removeFromLeft(spacing / 2);  // Smaller spacing between M and S buttons
+    scSoloButton.setBounds(scRow.removeFromLeft(buttonSize).withTrimmedTop(trimTopMargin));
     leftSection.removeFromTop(spacing);
 
-    // HC Trim - [Label][Knob][Mute] (Top-Right quadrant)
+    // HC Trim - [Label][Knob][Mute][Solo] (Top-Right quadrant)
     auto hcRow = leftSection.removeFromTop(trimRowHeight);
     hcTrimLabel.setBounds(hcRow.removeFromLeft(trimLabelWidth).withTrimmedTop(trimTopMargin));
     hcTrimSlider.setBounds(hcRow.removeFromLeft(trimKnobSize));
     hcRow.removeFromLeft(spacing);
     hcMuteButton.setBounds(hcRow.removeFromLeft(buttonSize).withTrimmedTop(trimTopMargin));
+    hcRow.removeFromLeft(spacing / 2);  // Smaller spacing between M and S buttons
+    hcSoloButton.setBounds(hcRow.removeFromLeft(buttonSize).withTrimmedTop(trimTopMargin));
     leftSection.removeFromTop(spacing);
 
-    // FL Trim - [Label][Knob][Mute] (Bottom-Right quadrant)
+    // FL Trim - [Label][Knob][Mute][Solo] (Bottom-Right quadrant)
     auto flRow = leftSection.removeFromTop(trimRowHeight);
     flTrimLabel.setBounds(flRow.removeFromLeft(trimLabelWidth).withTrimmedTop(trimTopMargin));
     flTrimSlider.setBounds(flRow.removeFromLeft(trimKnobSize));
     flRow.removeFromLeft(spacing);
     flMuteButton.setBounds(flRow.removeFromLeft(buttonSize).withTrimmedTop(trimTopMargin));
+    flRow.removeFromLeft(spacing / 2);  // Smaller spacing between M and S buttons
+    flSoloButton.setBounds(flRow.removeFromLeft(buttonSize).withTrimmedTop(trimTopMargin));
     leftSection.removeFromTop(spacing);
 
     // Reset Trims button (50% smaller)
@@ -1568,8 +1771,8 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     // Positioned absolutely to overlay the bottom section
     if (advancedPanel.isVisible())
     {
-        const int advancedPanelWidth = static_cast<int>(572 * scale);  // Increased 30% more (440 * 1.3) for clear value visibility
-        const int advancedPanelHeight = static_cast<int>(340 * scale);
+        const int advancedPanelWidth = static_cast<int>(600 * scale);  // Wider for two-column layout
+        const int advancedPanelHeight = static_cast<int>(312 * scale);  // 50% larger than previous (208 * 1.5)
         int advancedPanelY = advancedButtonY + advancedButtonHeight + static_cast<int>(8 * scale);
         int advancedPanelX = centerSection.getX() + (availableWidth - advancedPanelWidth) / 2;
         advancedPanel.setBounds(advancedPanelX, advancedPanelY, advancedPanelWidth, advancedPanelHeight);
@@ -1621,10 +1824,10 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     auto mixRow = rightSection.removeFromTop(knobSize);
     mixLabel.setBounds(mixRow.removeFromLeft(static_cast<int>(60 * scale)).removeFromTop(knobSize));
     mixSlider.setBounds(mixRow.removeFromLeft(knobSize));
-    rightSection.removeFromTop(spacing * 3);
+    rightSection.removeFromTop(spacing * 2);
 
     // === OUTPUT LIMITER CONTROLS (Simplified) ===
-    rightSection.removeFromTop(spacing * 2);
+    rightSection.removeFromTop(spacing);
 
     // Output Ceiling (shared by both limiters)
     auto ceilingRow = rightSection.removeFromTop(knobSize);
@@ -1640,19 +1843,19 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     // True Peak Enable Button
     auto truePeakRow = rightSection.removeFromTop(static_cast<int>(28 * scale));
     truePeakEnableButton.setBounds(truePeakRow.removeFromLeft(static_cast<int>(95 * scale)));
-    rightSection.removeFromTop(spacing * 2);
+    rightSection.removeFromTop(spacing);
 
-    // ========== BOTTOM (VISUALIZATIONS) - FULL WIDTH ==========
+    // ========== RIGHT EDGE METERS (INPUT/OUTPUT) ==========
+    // Position input and output meters side-by-side from right edge: [IN] [OUT]
+    // Signal flow reads left to right
+    outputMeter.setBounds(meterArea.removeFromRight(meterWidth));
+    meterArea.removeFromRight(meterGap);  // Gap between meters
+    inputMeter.setBounds(meterArea.removeFromRight(meterWidth));
+
+    // ========== BOTTOM (WAVEFORM) - FULL WIDTH ==========
     oscilloscope.setBounds(oscilloscopeArea.reduced(padding, 0));
 
-    // ========== RIGHT EDGE (MASTER METER) ==========
-    // Master meter matches waveform display height
-    int masterMeterTop = oscilloscopeArea.getY();
-    int masterMeterBottom = oscilloscopeArea.getBottom();
-    int masterMeterHeight = masterMeterBottom - masterMeterTop;
-
-    masterMeter.setBounds(masterMeterArea.getX() + static_cast<int>(4 * scale),
-                          masterMeterTop,
-                          masterMeterArea.getWidth() - static_cast<int>(8 * scale),
-                          masterMeterHeight);
+    // Transfer Curve toggle button and meter (hidden, not used in current layout)
+    transferCurveToggleButton.setBounds(0, 0, 0, 0);
+    transferCurveMeter.setBounds(0, 0, 0, 0);
 }

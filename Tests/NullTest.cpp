@@ -281,10 +281,12 @@ public:
         // Disable protection
         setParameter("PROTECTION_ENABLE", 0.0f);
 
-        // DEBUG: Print parameter values
+#ifdef DEBUG
+        // Print parameter values (debug builds only)
         std::cout << "DEBUG: INPUT_GAIN = " << processor.apvts.getRawParameterValue("INPUT_GAIN")->load() << " dB" << std::endl;
         std::cout << "DEBUG: OUTPUT_GAIN = " << processor.apvts.getRawParameterValue("OUTPUT_GAIN")->load() << " dB" << std::endl;
         std::cout << "DEBUG: MIX_WET = " << processor.apvts.getRawParameterValue("MIX_WET")->load() << " %" << std::endl;
+#endif
 
         // Process
         processBuffer(outputBuffer);
