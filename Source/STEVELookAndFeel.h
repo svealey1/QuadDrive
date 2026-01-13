@@ -62,12 +62,17 @@ public:
 
     void drawRotarySlider(juce::Graphics& g, int x, int y, int width, int height,
                           float sliderPosProportional, float rotaryStartAngle,
-                          float rotaryEndAngle, juce::Slider&) override
+                          float rotaryEndAngle, juce::Slider& slider) override
     {
         const float radius = juce::jmin(width / 2.0f, height / 2.0f) - 8.0f;
         const float centreX = x + width * 0.5f;
         const float centreY = y + height * 0.5f;
         const float angle = rotaryStartAngle + sliderPosProportional * (rotaryEndAngle - rotaryStartAngle);
+
+        // Get accent color - use slider's thumbColourId if set, otherwise default accentBlue
+        juce::Colour arcColour = slider.isColourSpecified(juce::Slider::thumbColourId)
+            ? slider.findColour(juce::Slider::thumbColourId)
+            : juce::Colour(accentBlue);
 
         // Outer ring (track)
         juce::Path trackPath;
@@ -83,7 +88,7 @@ public:
         valuePath.addCentredArc(centreX, centreY, radius, radius,
                                0.0f, rotaryStartAngle, angle, true);
 
-        g.setColour(juce::Colour(accentBlue));
+        g.setColour(arcColour);
         strokeType = juce::PathStrokeType(3.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded);
         g.strokePath(valuePath, strokeType);
 

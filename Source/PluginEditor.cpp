@@ -503,64 +503,154 @@ void XYPad::paint(juce::Graphics& g)
     const auto bounds = getLocalBounds().toFloat();
     const float width = bounds.getWidth();
     const float height = bounds.getHeight();
+    const float centerX = width / 2.0f;
+    const float centerY = height / 2.0f;
 
-    // Modern gradient background
-    juce::ColourGradient gradient(juce::Colour(22, 22, 26), bounds.getX(), bounds.getY(),
-                                   juce::Colour(18, 18, 22), bounds.getX(), bounds.getBottom(), false);
-    g.setGradientFill(gradient);
-    g.fillRoundedRectangle(bounds, 6.0f);
+    // Get processor colors
+    const auto& colors = processor.processorColors;
 
-    // Ultra-minimal grid lines
-    g.setColour(juce::Colour(55, 55, 60).withAlpha(0.4f));
-    g.drawLine(width / 2.0f, 0, width / 2.0f, height, 1.0f);
-    g.drawLine(0, height / 2.0f, width, height / 2.0f, 1.0f);
+    // Get mute states
+    bool hcMuted = apvts.getRawParameterValue("HC_MUTE")->load() > 0.5f;
+    bool scMuted = apvts.getRawParameterValue("SC_MUTE")->load() > 0.5f;
+    bool slMuted = apvts.getRawParameterValue("SL_MUTE")->load() > 0.5f;
+    bool flMuted = apvts.getRawParameterValue("FL_MUTE")->load() > 0.5f;
 
-    // Sleek quadrant labels
-    g.setColour(juce::Colours::white.withAlpha(0.5f));
-    g.setFont(juce::Font(9.5f, juce::Font::plain));
+    // Get GR values (for ring glow intensity)
+    float hcGR = processor.currentHardClipGR.load();
+    float scGR = processor.currentSoftClipGR.load();
+    float slGR = processor.currentSlowLimitGR.load();
+    float flGR = processor.currentFastLimitGR.load();
+    float totalGR = hcGR + scGR + slGR + flGR;
 
-    // Top-left: Hard Clip (Transparent/Safety Clipping)
-    juce::Rectangle<float> hardClipArea(10, 10, width / 2.0f - 20, 16);
-    g.drawText("HARD", hardClipArea, juce::Justification::centredLeft);
+    // Modern gradient background - darker for contrast with ring
+    juce::ColourGradient bgGradient(juce::Colour(12, 12, 16), centerX, centerY,
+                                     juce::Colour(8, 8, 10), centerX, bounds.getBottom(), true);
+    g.setGradientFill(bgGradient);
+    g.fillRoundedRectangle(bounds, 8.0f);
 
-    // Top-right: Fast Limit (Quick Response Limiting)
-    juce::Rectangle<float> fastLimitArea(width / 2.0f + 10, 10, width / 2.0f - 20, 16);
-    g.drawText("FAST", fastLimitArea, juce::Justification::centredRight);
+    // === SEGMENTED RING VISUALIZATION ===
+    // Draw a ring that shows processor weighting with color segments
+    const float ringRadius = std::min(width, height) * 0.42f;
+    const float ringThickness = 3.0f;
+    const float pi = juce::MathConstants<float>::pi;
 
-    // Bottom-left: Soft Clip (Musical Warmth/Saturation)
-    juce::Rectangle<float> softClipArea(10, height - 24, width / 2.0f - 20, 16);
-    g.drawText("SOFT", softClipArea, juce::Justification::centredLeft);
+    // Calculate blend weights based on XY position
+    float xPos = static_cast<float>(xSlider.getValue());
+    float yPos = static_cast<float>(ySlider.getValue());
 
-    // Bottom-right: Slow Limit (Smooth Mastering Character)
-    juce::Rectangle<float> slowLimitArea(width / 2.0f + 10, height - 24, width / 2.0f - 20, 16);
-    g.drawText("SLOW", slowLimitArea, juce::Justification::centredRight);
+    // Weight calculation: corners get 100%, center gets 25% each
+    // Top-left (0,1) = Hard, Top-right (1,1) = Fast
+    // Bottom-left (0,0) = Soft, Bottom-right (1,0) = Slow
+    float hardWeight = (1.0f - xPos) * yPos;         // Top-left
+    float fastWeight = xPos * yPos;                   // Top-right
+    float softWeight = (1.0f - xPos) * (1.0f - yPos); // Bottom-left
+    float slowWeight = xPos * (1.0f - yPos);          // Bottom-right
 
-    // Draw thumb position with modern glow
-    float x = xSlider.getValue();
-    float y = 1.0f - ySlider.getValue();
+    // Draw ring segments (each quadrant colored by its processor)
+    auto drawRingSegment = [&](float startAngle, float endAngle, juce::Colour color, float weight, bool muted)
+    {
+        if (muted)
+            color = color.withSaturation(0.2f).withBrightness(0.3f);  // Desaturated when muted
 
-    float thumbX = bounds.getX() + x * width;
-    float thumbY = bounds.getY() + y * height;
+        // Base ring segment
+        float alpha = 0.3f + weight * 0.5f;  // More opaque when weighted toward this processor
+        g.setColour(color.withAlpha(alpha));
 
-    // Outer glow
-    g.setColour(juce::Colour(255, 120, 50).withAlpha(0.2f));
-    g.fillEllipse(thumbX - 10, thumbY - 10, 20, 20);
+        juce::Path segment;
+        segment.addCentredArc(centerX, centerY, ringRadius, ringRadius, 0.0f, startAngle, endAngle, true);
+        g.strokePath(segment, juce::PathStrokeType(ringThickness, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    };
+
+    // Draw 4 quadrant segments (angles in radians, 0 = right, going clockwise)
+    // Hard (top-left): -135° to -45° (-3π/4 to -π/4)
+    drawRingSegment(-pi * 0.75f, -pi * 0.25f, colors.hardClip, hardWeight, hcMuted);
+    // Fast (top-right): -45° to 45° (-π/4 to π/4)
+    drawRingSegment(-pi * 0.25f, pi * 0.25f, colors.fastLimit, fastWeight, flMuted);
+    // Slow (bottom-right): 45° to 135° (π/4 to 3π/4)
+    drawRingSegment(pi * 0.25f, pi * 0.75f, colors.slowLimit, slowWeight, slMuted);
+    // Soft (bottom-left): 135° to 225° (3π/4 to 5π/4 or -3π/4)
+    drawRingSegment(pi * 0.75f, pi * 1.25f, colors.softClip, softWeight, scMuted);
+
+    // === GR-DRIVEN CENTER GLOW ===
+    // Radial gradient from center that pulses with total GR
+    float glowIntensity = juce::jmap(totalGR, 0.0f, 12.0f, 0.15f, 0.6f);
+    glowIntensity = juce::jlimit(0.15f, 0.6f, glowIntensity);
+
+    juce::ColourGradient centerGlow(juce::Colour(255, 140, 60).withAlpha(glowIntensity), centerX, centerY,
+                                     juce::Colours::transparentBlack, centerX, centerY + ringRadius * 0.6f, true);
+    g.setGradientFill(centerGlow);
+    g.fillEllipse(centerX - ringRadius * 0.6f, centerY - ringRadius * 0.6f, ringRadius * 1.2f, ringRadius * 1.2f);
+
+    // === CORNER INDICATORS ===
+    // Small dots at each corner that show processor state
+    const float cornerOffset = 18.0f;
+    const float indicatorSize = 8.0f;
+
+    auto drawCornerIndicator = [&](float cx, float cy, juce::Colour color, float gr, bool muted)
+    {
+        float alpha = muted ? 0.15f : (0.4f + juce::jmap(gr, 0.0f, 6.0f, 0.0f, 0.5f));
+        alpha = juce::jlimit(0.15f, 0.9f, alpha);
+
+        // Glow
+        if (!muted && gr > 0.1f)
+        {
+            g.setColour(color.withAlpha(alpha * 0.4f));
+            g.fillEllipse(cx - indicatorSize, cy - indicatorSize, indicatorSize * 2, indicatorSize * 2);
+        }
+
+        // Core dot
+        g.setColour(muted ? color.withSaturation(0.1f).withBrightness(0.3f) : color.withAlpha(alpha));
+        g.fillEllipse(cx - indicatorSize * 0.5f, cy - indicatorSize * 0.5f, indicatorSize, indicatorSize);
+    };
+
+    // Corner positions: Hard (TL), Fast (TR), Soft (BL), Slow (BR)
+    drawCornerIndicator(cornerOffset, cornerOffset, colors.hardClip, hcGR, hcMuted);
+    drawCornerIndicator(width - cornerOffset, cornerOffset, colors.fastLimit, flGR, flMuted);
+    drawCornerIndicator(cornerOffset, height - cornerOffset, colors.softClip, scGR, scMuted);
+    drawCornerIndicator(width - cornerOffset, height - cornerOffset, colors.slowLimit, slGR, slMuted);
+
+    // === CORNER LABELS ===
+    g.setFont(juce::FontOptions(9.5f));
+
+    auto drawCornerLabel = [&](float lx, float ly, const juce::String& text, juce::Colour color, bool muted, juce::Justification just)
+    {
+        g.setColour(muted ? juce::Colours::grey.withAlpha(0.4f) : color.withAlpha(0.7f));
+        juce::Rectangle<float> labelArea(lx, ly, 40, 14);
+        g.drawText(text, labelArea, just);
+    };
+
+    drawCornerLabel(cornerOffset + 12, cornerOffset - 3, "HARD", colors.hardClip, hcMuted, juce::Justification::centredLeft);
+    drawCornerLabel(width - cornerOffset - 52, cornerOffset - 3, "FAST", colors.fastLimit, flMuted, juce::Justification::centredRight);
+    drawCornerLabel(cornerOffset + 12, height - cornerOffset - 11, "SOFT", colors.softClip, scMuted, juce::Justification::centredLeft);
+    drawCornerLabel(width - cornerOffset - 52, height - cornerOffset - 11, "SLOW", colors.slowLimit, slMuted, juce::Justification::centredRight);
+
+    // === THUMB/DOT ===
+    float thumbX = bounds.getX() + xPos * width;
+    float thumbY = bounds.getY() + (1.0f - yPos) * height;
+
+    // Calculate blended thumb color based on position weights
+    juce::Colour thumbColor = colors.hardClip.interpolatedWith(colors.fastLimit, xPos)
+                                 .interpolatedWith(colors.softClip.interpolatedWith(colors.slowLimit, xPos), 1.0f - yPos);
+
+    // Outer glow (processor-colored)
+    g.setColour(thumbColor.withAlpha(0.25f));
+    g.fillEllipse(thumbX - 12, thumbY - 12, 24, 24);
 
     // Middle glow
-    g.setColour(juce::Colour(255, 120, 50).withAlpha(0.4f));
+    g.setColour(thumbColor.withAlpha(0.5f));
     g.fillEllipse(thumbX - 8, thumbY - 8, 16, 16);
 
     // Solid thumb
-    g.setColour(juce::Colour(255, 120, 50));
+    g.setColour(thumbColor);
     g.fillEllipse(thumbX - 6, thumbY - 6, 12, 12);
 
     // White center dot
-    g.setColour(juce::Colours::white.withAlpha(0.9f));
+    g.setColour(juce::Colours::white.withAlpha(0.95f));
     g.fillEllipse(thumbX - 2, thumbY - 2, 4, 4);
 
-    // Clean outer border
-    g.setColour(juce::Colour(60, 60, 65).withAlpha(0.4f));
-    g.drawRoundedRectangle(bounds.reduced(0.5f), 6.0f, 1.0f);
+    // === OUTER BORDER ===
+    g.setColour(juce::Colour(50, 50, 55).withAlpha(0.6f));
+    g.drawRoundedRectangle(bounds.reduced(0.5f), 8.0f, 1.5f);
 }
 
 void XYPad::mouseDown(const juce::MouseEvent& event)
@@ -1085,6 +1175,106 @@ void AdvancedPanel::setVisible(bool shouldBeVisible)
 }
 
 //==============================================================================
+// Preferences Panel Implementation
+//==============================================================================
+PreferencesPanel::PreferencesPanel(QuadBlendDriveAudioProcessor& p)
+    : processor(p)
+{
+    // Title
+    titleLabel.setText("Processor Colors", juce::dontSendNotification);
+    titleLabel.setFont(juce::FontOptions(14.0f, juce::Font::bold));
+    titleLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.9f));
+    addAndMakeVisible(titleLabel);
+
+    // Color swatches
+    hardClipColor.onColorChanged = [this](juce::Colour c) {
+        processor.processorColors.hardClip = c;
+    };
+    addAndMakeVisible(hardClipColor);
+
+    softClipColor.onColorChanged = [this](juce::Colour c) {
+        processor.processorColors.softClip = c;
+    };
+    addAndMakeVisible(softClipColor);
+
+    slowLimitColor.onColorChanged = [this](juce::Colour c) {
+        processor.processorColors.slowLimit = c;
+    };
+    addAndMakeVisible(slowLimitColor);
+
+    fastLimitColor.onColorChanged = [this](juce::Colour c) {
+        processor.processorColors.fastLimit = c;
+    };
+    addAndMakeVisible(fastLimitColor);
+
+    // Reset button
+    resetButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff2a2a2a));
+    resetButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.7f));
+    resetButton.onClick = [this]() {
+        processor.processorColors.resetToDefaults();
+        syncFromProcessor();
+    };
+    addAndMakeVisible(resetButton);
+
+    // Sync colors from processor on construction
+    syncFromProcessor();
+
+    setSize(200, 180);
+}
+
+void PreferencesPanel::paint(juce::Graphics& g)
+{
+    // Panel background with gradient
+    juce::ColourGradient gradient(juce::Colour(28, 28, 32), 0, 0,
+                                   juce::Colour(22, 22, 26), 0, static_cast<float>(getHeight()), false);
+    g.setGradientFill(gradient);
+    g.fillRoundedRectangle(getLocalBounds().toFloat(), 8.0f);
+
+    // Border
+    g.setColour(juce::Colour(60, 60, 65));
+    g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(0.5f), 8.0f, 1.0f);
+}
+
+void PreferencesPanel::resized()
+{
+    auto bounds = getLocalBounds().reduced(12);
+    const int rowHeight = 24;
+    const int spacing = 6;
+
+    titleLabel.setBounds(bounds.removeFromTop(rowHeight));
+    bounds.removeFromTop(spacing);
+
+    hardClipColor.setBounds(bounds.removeFromTop(rowHeight));
+    bounds.removeFromTop(spacing);
+
+    softClipColor.setBounds(bounds.removeFromTop(rowHeight));
+    bounds.removeFromTop(spacing);
+
+    slowLimitColor.setBounds(bounds.removeFromTop(rowHeight));
+    bounds.removeFromTop(spacing);
+
+    fastLimitColor.setBounds(bounds.removeFromTop(rowHeight));
+    bounds.removeFromTop(spacing + 4);
+
+    resetButton.setBounds(bounds.removeFromTop(22));
+}
+
+void PreferencesPanel::setVisible(bool shouldBeVisible)
+{
+    if (shouldBeVisible)
+        syncFromProcessor();
+    Component::setVisible(shouldBeVisible);
+}
+
+void PreferencesPanel::syncFromProcessor()
+{
+    hardClipColor.setColor(processor.processorColors.hardClip);
+    softClipColor.setColor(processor.processorColors.softClip);
+    slowLimitColor.setColor(processor.processorColors.slowLimit);
+    fastLimitColor.setColor(processor.processorColors.fastLimit);
+}
+
+//==============================================================================
 // Editor Implementation
 //==============================================================================
 QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlendDriveAudioProcessor& p)
@@ -1093,6 +1283,7 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
       xyPad(p.apvts, "XY_X_PARAM", "XY_Y_PARAM", p),
       calibrationPanel(p.apvts, p),
       advancedPanel(p.apvts),
+      preferencesPanel(p),
       steveScope(p),
       transferCurveMeter(p),  // Transfer curve with level meter
       inputMeter(p, true),    // Stereo input meter
@@ -1430,6 +1621,29 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     };
     addAndMakeVisible(helpButton);
 
+    // Preferences Button - shows processor color settings
+    preferencesButton.setButtonText("COLORS");
+    preferencesButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
+    preferencesButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
+    preferencesButton.onClick = [this]()
+    {
+        // Toggle preferences panel visibility
+        bool shouldShow = !preferencesPanel.isVisible();
+        preferencesPanel.setVisible(shouldShow);
+
+        // Position the panel near the button
+        if (shouldShow)
+        {
+            auto buttonBounds = preferencesButton.getBoundsInParent();
+            preferencesPanel.setBounds(buttonBounds.getX() - 80, buttonBounds.getBottom() + 5, 200, 180);
+        }
+    };
+    addAndMakeVisible(preferencesButton);
+
+    // Add preferences panel (initially hidden)
+    preferencesPanel.setVisible(false);
+    addAndMakeVisible(preferencesPanel);
+
     // Scope Toggle Button - expands window to show oscilloscope below 600px
     scopeToggleButton.setButtonText("SCOPE");
     scopeToggleButton.setClickingTogglesState(true);
@@ -1559,11 +1773,13 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     // Start timer for updating normalization display (now in CalibrationPanel)
     startTimerHz(10);  // 10 Hz update rate
 
-    // Setup Trim Sliders (proportional to main knobs)
-    auto setupTrimSlider = [this](juce::Slider& slider, juce::Label& label, const juce::String& text)
+    // Setup Trim Sliders (proportional to main knobs) with processor colors
+    auto setupTrimSlider = [this](juce::Slider& slider, juce::Label& label, const juce::String& text, int processorIndex)
     {
         slider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
         slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 62, 18);
+        // Set processor-specific color (will be updated in timer callback if colors change)
+        slider.setColour(juce::Slider::thumbColourId, audioProcessor.processorColors.getColor(processorIndex));
         addAndMakeVisible(slider);
 
         label.setText(text, juce::dontSendNotification);
@@ -1572,10 +1788,10 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
         addAndMakeVisible(label);
     };
 
-    setupTrimSlider(hcTrimSlider, hcTrimLabel, "Hard");
-    setupTrimSlider(scTrimSlider, scTrimLabel, "Soft");
-    setupTrimSlider(slTrimSlider, slTrimLabel, "Slow");
-    setupTrimSlider(flTrimSlider, flTrimLabel, "Fast");
+    setupTrimSlider(hcTrimSlider, hcTrimLabel, "Hard", 0);
+    setupTrimSlider(scTrimSlider, scTrimLabel, "Soft", 1);
+    setupTrimSlider(slTrimSlider, slTrimLabel, "Slow", 2);
+    setupTrimSlider(flTrimSlider, flTrimLabel, "Fast", 3);
 
     // Setup Delta Mode Controls - Consistent button styling
     deltaModeButton.setButtonText("DELTA MODE");
@@ -1918,6 +2134,12 @@ void QuadBlendDriveAudioProcessorEditor::timerCallback()
     calibrationPanel.updateInputPeakDisplay(peakDB);
     calibrationPanel.updateGainAppliedDisplay(gainDB);
 
+    // Update trim slider colors if processor colors have changed
+    hcTrimSlider.setColour(juce::Slider::thumbColourId, audioProcessor.processorColors.hardClip);
+    scTrimSlider.setColour(juce::Slider::thumbColourId, audioProcessor.processorColors.softClip);
+    slTrimSlider.setColour(juce::Slider::thumbColourId, audioProcessor.processorColors.slowLimit);
+    flTrimSlider.setColour(juce::Slider::thumbColourId, audioProcessor.processorColors.fastLimit);
+
     // Update Undo/Redo button enabled states
     bool canUndo = audioProcessor.undoManager.canUndo();
     bool canRedo = audioProcessor.undoManager.canRedo();
@@ -2113,12 +2335,15 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     toolbarX += engineLabelWidth + static_cast<int>(4 * scale);
     processingModeCombo.setBounds(toolbarX, toolbarY, engineComboWidth, toolbarButtonHeight);
 
-    // Right side of toolbar: Undo, Redo, Help, Version
+    // Right side of toolbar: Colors, Undo, Redo, Help, Version
+    const int colorsBtnWidth = static_cast<int>(55 * scale);
     int rightX = getWidth() - toolbarPadding - versionWidth;
     versionLabel.setBounds(rightX, toolbarY, versionWidth, toolbarButtonHeight);
     rightX -= helpBtnWidth + static_cast<int>(12 * scale);
     helpButton.setBounds(rightX, toolbarY, helpBtnWidth, toolbarButtonHeight);
-    rightX -= undoRedoWidth + static_cast<int>(20 * scale);
+    rightX -= colorsBtnWidth + static_cast<int>(8 * scale);
+    preferencesButton.setBounds(rightX, toolbarY, colorsBtnWidth, toolbarButtonHeight);
+    rightX -= undoRedoWidth + static_cast<int>(12 * scale);
     redoButton.setBounds(rightX, toolbarY, undoRedoWidth, toolbarButtonHeight);
     rightX -= undoRedoWidth + static_cast<int>(8 * scale);
     undoButton.setBounds(rightX, toolbarY, undoRedoWidth, toolbarButtonHeight);

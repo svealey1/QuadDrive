@@ -192,6 +192,104 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> flSustainAttachment;
 };
 
+// Color Swatch Button for Preferences Panel
+class ColorSwatchButton : public juce::Component
+{
+public:
+    ColorSwatchButton(const juce::String& label, juce::Colour initialColor)
+        : labelText(label), currentColor(initialColor)
+    {
+        changeListener = std::make_unique<ChangeListener>(*this);
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        auto bounds = getLocalBounds().toFloat();
+
+        // Draw color swatch
+        auto swatchBounds = bounds.removeFromLeft(bounds.getHeight()).reduced(2.0f);
+        g.setColour(currentColor);
+        g.fillRoundedRectangle(swatchBounds, 4.0f);
+        g.setColour(juce::Colours::white.withAlpha(0.3f));
+        g.drawRoundedRectangle(swatchBounds, 4.0f, 1.0f);
+
+        // Draw label
+        g.setColour(juce::Colours::white.withAlpha(0.85f));
+        g.setFont(juce::FontOptions(13.0f));
+        g.drawText(labelText, bounds.reduced(8.0f, 0.0f), juce::Justification::centredLeft);
+    }
+
+    void mouseDown(const juce::MouseEvent&) override
+    {
+        // Show color picker
+        auto colorSelector = std::make_unique<juce::ColourSelector>(
+            juce::ColourSelector::showColourAtTop |
+            juce::ColourSelector::showSliders |
+            juce::ColourSelector::showColourspace);
+        colorSelector->setCurrentColour(currentColor);
+        colorSelector->setSize(300, 400);
+        colorSelector->addChangeListener(changeListener.get());
+
+        juce::CallOutBox::launchAsynchronously(std::move(colorSelector), getScreenBounds(), nullptr);
+    }
+
+    void setColor(juce::Colour color)
+    {
+        currentColor = color;
+        repaint();
+        if (onColorChanged)
+            onColorChanged(currentColor);
+    }
+
+    juce::Colour getColor() const { return currentColor; }
+
+    std::function<void(juce::Colour)> onColorChanged;
+
+private:
+    class ChangeListener : public juce::ChangeListener
+    {
+    public:
+        ChangeListener(ColorSwatchButton& o) : ownerButton(o) {}
+        void changeListenerCallback(juce::ChangeBroadcaster* source) override
+        {
+            if (auto* selector = dynamic_cast<juce::ColourSelector*>(source))
+                ownerButton.setColor(selector->getCurrentColour());
+        }
+    private:
+        ColorSwatchButton& ownerButton;
+    };
+
+    juce::String labelText;
+    juce::Colour currentColor;
+    std::unique_ptr<ChangeListener> changeListener;
+};
+
+// Preferences Panel (Processor Colors)
+class PreferencesPanel : public juce::Component
+{
+public:
+    PreferencesPanel(QuadBlendDriveAudioProcessor& processor);
+
+    void paint(juce::Graphics& g) override;
+    void resized() override;
+
+    void setVisible(bool shouldBeVisible) override;
+    bool isOpen() const { return isVisible(); }
+
+    // Sync colors from processor (call when panel opens)
+    void syncFromProcessor();
+
+private:
+    QuadBlendDriveAudioProcessor& processor;
+
+    juce::Label titleLabel;
+    ColorSwatchButton hardClipColor{"Hard Clip", juce::Colour(0xffff5050)};
+    ColorSwatchButton softClipColor{"Soft Clip", juce::Colour(0xffff963c)};
+    ColorSwatchButton slowLimitColor{"Slow Limit", juce::Colour(0xffffdc50)};
+    ColorSwatchButton fastLimitColor{"Fast Limit", juce::Colour(0xff50a0ff)};
+    juce::TextButton resetButton{"Reset to Defaults"};
+};
+
 class QuadBlendDriveAudioProcessorEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
@@ -217,6 +315,10 @@ private:
     // Advanced Panel
     AdvancedPanel advancedPanel;
     juce::TextButton advancedToggleButton;
+
+    // Preferences Panel
+    PreferencesPanel preferencesPanel;
+    juce::TextButton preferencesButton;
 
     // Visualizations
     STEVEScope steveScope;  // Comprehensive waveform scope with settings menu

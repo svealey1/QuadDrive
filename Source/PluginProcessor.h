@@ -5,6 +5,50 @@
 #include "OversamplingManager.h"
 #include "DSP/EnvelopeShaper.h"
 
+/**
+ * @brief User-configurable processor colors for UI visualization
+ * Colors are saved to plugin state (like BrainWorx plugins)
+ */
+struct ProcessorColors
+{
+    // Default colors match STEVEScope GR colors
+    juce::Colour hardClip  { 0xffff5050 };  // Red
+    juce::Colour softClip  { 0xffff963c };  // Orange
+    juce::Colour slowLimit { 0xffffdc50 };  // Yellow
+    juce::Colour fastLimit { 0xff50a0ff };  // Blue
+
+    juce::Colour getColor(int index) const
+    {
+        switch (index)
+        {
+            case 0: return hardClip;
+            case 1: return softClip;
+            case 2: return slowLimit;
+            case 3: return fastLimit;
+            default: return juce::Colours::white;
+        }
+    }
+
+    void setColor(int index, juce::Colour color)
+    {
+        switch (index)
+        {
+            case 0: hardClip = color; break;
+            case 1: softClip = color; break;
+            case 2: slowLimit = color; break;
+            case 3: fastLimit = color; break;
+        }
+    }
+
+    void resetToDefaults()
+    {
+        hardClip  = juce::Colour(0xffff5050);
+        softClip  = juce::Colour(0xffff963c);
+        slowLimit = juce::Colour(0xffffdc50);
+        fastLimit = juce::Colour(0xff50a0ff);
+    }
+};
+
 class QuadBlendDriveAudioProcessor : public juce::AudioProcessor
 {
 public:
@@ -62,6 +106,10 @@ public:
 
     juce::UndoManager undoManager;
     juce::AudioProcessorValueTreeState apvts;
+
+    // === USER PREFERENCES: PROCESSOR COLORS ===
+    // Configurable colors for each processor type (saved to plugin state)
+    ProcessorColors processorColors;
 
     // Normalization state - exposed for UI
     std::atomic<double> currentPeakDB{-60.0};

@@ -4005,6 +4005,12 @@ void QuadBlendDriveAudioProcessor::getStateInformation(juce::MemoryBlock& destDa
     xml->setAttribute("computedNormalizationGain", computedNormalizationGain);
     xml->setAttribute("peakInputLevel", peakInputLevel);
 
+    // Save processor colors (user preferences)
+    xml->setAttribute("colorHardClip", static_cast<int>(processorColors.hardClip.getARGB()));
+    xml->setAttribute("colorSoftClip", static_cast<int>(processorColors.softClip.getARGB()));
+    xml->setAttribute("colorSlowLimit", static_cast<int>(processorColors.slowLimit.getARGB()));
+    xml->setAttribute("colorFastLimit", static_cast<int>(processorColors.fastLimit.getARGB()));
+
     // Save preset slots as child elements
     for (int i = 0; i < 4; ++i)
     {
@@ -4038,6 +4044,16 @@ void QuadBlendDriveAudioProcessor::setStateInformation(const void* data, int siz
             computedNormalizationGain = xmlState->getDoubleAttribute("computedNormalizationGain", 1.0);
         if (xmlState->hasAttribute("peakInputLevel"))
             peakInputLevel = xmlState->getDoubleAttribute("peakInputLevel", 0.0);
+
+        // Restore processor colors (user preferences)
+        if (xmlState->hasAttribute("colorHardClip"))
+            processorColors.hardClip = juce::Colour(static_cast<uint32_t>(xmlState->getIntAttribute("colorHardClip")));
+        if (xmlState->hasAttribute("colorSoftClip"))
+            processorColors.softClip = juce::Colour(static_cast<uint32_t>(xmlState->getIntAttribute("colorSoftClip")));
+        if (xmlState->hasAttribute("colorSlowLimit"))
+            processorColors.slowLimit = juce::Colour(static_cast<uint32_t>(xmlState->getIntAttribute("colorSlowLimit")));
+        if (xmlState->hasAttribute("colorFastLimit"))
+            processorColors.fastLimit = juce::Colour(static_cast<uint32_t>(xmlState->getIntAttribute("colorFastLimit")));
 
         // Restore preset slots
         for (int i = 0; i < 4; ++i)
