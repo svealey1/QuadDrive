@@ -16,6 +16,7 @@ struct ProcessorColors
     juce::Colour softClip  { 0xffff963c };  // Orange
     juce::Colour slowLimit { 0xffffdc50 };  // Yellow
     juce::Colour fastLimit { 0xff50a0ff };  // Blue
+    juce::Colour accent    { 0xff4a9eff };  // Accent blue (for non-processor controls)
 
     juce::Colour getColor(int index) const
     {
@@ -25,6 +26,7 @@ struct ProcessorColors
             case 1: return softClip;
             case 2: return slowLimit;
             case 3: return fastLimit;
+            case 4: return accent;
             default: return juce::Colours::white;
         }
     }
@@ -37,6 +39,7 @@ struct ProcessorColors
             case 1: softClip = color; break;
             case 2: slowLimit = color; break;
             case 3: fastLimit = color; break;
+            case 4: accent = color; break;
         }
     }
 
@@ -46,6 +49,7 @@ struct ProcessorColors
         softClip  = juce::Colour(0xffff963c);
         slowLimit = juce::Colour(0xffffdc50);
         fastLimit = juce::Colour(0xff50a0ff);
+        accent    = juce::Colour(0xff4a9eff);
     }
 };
 

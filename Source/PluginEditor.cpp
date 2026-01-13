@@ -496,6 +496,20 @@ XYPad::XYPad(juce::AudioProcessorValueTreeState& apvts,
 
     addChildComponent(xSlider);
     addChildComponent(ySlider);
+
+    // Start timer for continuous ring updates (for mute toggle responsiveness)
+    startTimerHz(30);
+}
+
+XYPad::~XYPad()
+{
+    stopTimer();
+}
+
+void XYPad::timerCallback()
+{
+    // Repaint to update ring colors when mute states or GR values change
+    repaint();
 }
 
 void XYPad::paint(juce::Graphics& g)
@@ -562,14 +576,15 @@ void XYPad::paint(juce::Graphics& g)
     };
 
     // Draw 4 quadrant segments (angles in radians, 0 = right, going clockwise)
-    // Hard (top-left): -135° to -45° (-3π/4 to -π/4)
-    drawRingSegment(-pi * 0.75f, -pi * 0.25f, colors.hardClip, hardWeight, hcMuted);
-    // Fast (top-right): -45° to 45° (-π/4 to π/4)
-    drawRingSegment(-pi * 0.25f, pi * 0.25f, colors.fastLimit, fastWeight, flMuted);
-    // Slow (bottom-right): 45° to 135° (π/4 to 3π/4)
-    drawRingSegment(pi * 0.25f, pi * 0.75f, colors.slowLimit, slowWeight, slMuted);
-    // Soft (bottom-left): 135° to 225° (3π/4 to 5π/4 or -3π/4)
-    drawRingSegment(pi * 0.75f, pi * 1.25f, colors.softClip, softWeight, scMuted);
+    // Rotated 45° to align with corners instead of edges
+    // Hard (top-left corner): -180° to -90° (-π to -π/2)
+    drawRingSegment(-pi, -pi * 0.5f, colors.hardClip, hardWeight, hcMuted);
+    // Fast (top-right corner): -90° to 0° (-π/2 to 0)
+    drawRingSegment(-pi * 0.5f, 0.0f, colors.fastLimit, fastWeight, flMuted);
+    // Slow (bottom-right corner): 0° to 90° (0 to π/2)
+    drawRingSegment(0.0f, pi * 0.5f, colors.slowLimit, slowWeight, slMuted);
+    // Soft (bottom-left corner): 90° to 180° (π/2 to π)
+    drawRingSegment(pi * 0.5f, pi, colors.softClip, softWeight, scMuted);
 
     // === GR-DRIVEN CENTER GLOW ===
     // Radial gradient from center that pulses with total GR
@@ -905,9 +920,10 @@ void CalibrationPanel::updateGainAppliedDisplay(double gainDB)
 // Advanced Panel Implementation
 // =============================================================================
 
-AdvancedPanel::AdvancedPanel(juce::AudioProcessorValueTreeState& apvts)
-    : apvts(apvts)
+AdvancedPanel::AdvancedPanel(juce::AudioProcessorValueTreeState& apvts, QuadBlendDriveAudioProcessor& p)
+    : apvts(apvts), processor(p)
 {
+    startTimerHz(15);  // Update colors periodically
     // Configure section labels
     softClipLabel.setText("SOFT CLIP", juce::dontSendNotification);
     softClipLabel.setFont(juce::Font(10.0f, juce::Font::bold));
@@ -1174,6 +1190,34 @@ void AdvancedPanel::setVisible(bool shouldBeVisible)
     Component::setVisible(shouldBeVisible);
 }
 
+AdvancedPanel::~AdvancedPanel()
+{
+    stopTimer();
+}
+
+void AdvancedPanel::timerCallback()
+{
+    // Update envelope slider colors to match processor colors
+    hcAttackSlider.setColour(juce::Slider::thumbColourId, processor.processorColors.hardClip);
+    hcSustainSlider.setColour(juce::Slider::thumbColourId, processor.processorColors.hardClip);
+    scAttackSlider.setColour(juce::Slider::thumbColourId, processor.processorColors.softClip);
+    scSustainSlider.setColour(juce::Slider::thumbColourId, processor.processorColors.softClip);
+    slAttackSlider.setColour(juce::Slider::thumbColourId, processor.processorColors.slowLimit);
+    slSustainSlider.setColour(juce::Slider::thumbColourId, processor.processorColors.slowLimit);
+    flAttackSlider.setColour(juce::Slider::thumbColourId, processor.processorColors.fastLimit);
+    flSustainSlider.setColour(juce::Slider::thumbColourId, processor.processorColors.fastLimit);
+
+    // Update comp button text colors to match processor colors
+    hcCompButton.setColour(juce::ToggleButton::textColourId, processor.processorColors.hardClip);
+    scCompButton.setColour(juce::ToggleButton::textColourId, processor.processorColors.softClip);
+    slCompButton.setColour(juce::ToggleButton::textColourId, processor.processorColors.slowLimit);
+    flCompButton.setColour(juce::ToggleButton::textColourId, processor.processorColors.fastLimit);
+
+    // Update section labels with processor colors
+    softClipLabel.setColour(juce::Label::textColourId, processor.processorColors.softClip);
+    limitersLabel.setColour(juce::Label::textColourId, processor.processorColors.slowLimit);
+}
+
 //==============================================================================
 // Preferences Panel Implementation
 //==============================================================================
@@ -1206,6 +1250,11 @@ PreferencesPanel::PreferencesPanel(QuadBlendDriveAudioProcessor& p)
         processor.processorColors.fastLimit = c;
     };
     addAndMakeVisible(fastLimitColor);
+
+    accentColor.onColorChanged = [this](juce::Colour c) {
+        processor.processorColors.accent = c;
+    };
+    addAndMakeVisible(accentColor);
 
     // Reset button
     resetButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff2a2a2a));
@@ -1254,6 +1303,9 @@ void PreferencesPanel::resized()
     bounds.removeFromTop(spacing);
 
     fastLimitColor.setBounds(bounds.removeFromTop(rowHeight));
+    bounds.removeFromTop(spacing);
+
+    accentColor.setBounds(bounds.removeFromTop(rowHeight));
     bounds.removeFromTop(spacing + 4);
 
     resetButton.setBounds(bounds.removeFromTop(22));
@@ -1272,6 +1324,7 @@ void PreferencesPanel::syncFromProcessor()
     softClipColor.setColor(processor.processorColors.softClip);
     slowLimitColor.setColor(processor.processorColors.slowLimit);
     fastLimitColor.setColor(processor.processorColors.fastLimit);
+    accentColor.setColor(processor.processorColors.accent);
 }
 
 //==============================================================================
@@ -1282,7 +1335,7 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
       audioProcessor(p),
       xyPad(p.apvts, "XY_X_PARAM", "XY_Y_PARAM", p),
       calibrationPanel(p.apvts, p),
-      advancedPanel(p.apvts),
+      advancedPanel(p.apvts, p),
       preferencesPanel(p),
       steveScope(p),
       transferCurveMeter(p),  // Transfer curve with level meter
@@ -1631,18 +1684,19 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
         bool shouldShow = !preferencesPanel.isVisible();
         preferencesPanel.setVisible(shouldShow);
 
-        // Position the panel near the button
+        // Position the panel near the button and bring to front
         if (shouldShow)
         {
             auto buttonBounds = preferencesButton.getBoundsInParent();
-            preferencesPanel.setBounds(buttonBounds.getX() - 80, buttonBounds.getBottom() + 5, 200, 180);
+            preferencesPanel.setBounds(buttonBounds.getX() - 80, buttonBounds.getBottom() + 5, 200, 210);
+            preferencesPanel.toFront(false);  // Bring to front so it shows on top
         }
     };
     addAndMakeVisible(preferencesButton);
 
-    // Add preferences panel (initially hidden)
+    // Add preferences panel (initially hidden - must start closed)
     preferencesPanel.setVisible(false);
-    addAndMakeVisible(preferencesPanel);
+    addChildComponent(preferencesPanel);  // Use addChildComponent so it starts hidden
 
     // Scope Toggle Button - expands window to show oscilloscope below 600px
     scopeToggleButton.setButtonText("SCOPE");
@@ -2139,6 +2193,13 @@ void QuadBlendDriveAudioProcessorEditor::timerCallback()
     scTrimSlider.setColour(juce::Slider::thumbColourId, audioProcessor.processorColors.softClip);
     slTrimSlider.setColour(juce::Slider::thumbColourId, audioProcessor.processorColors.slowLimit);
     flTrimSlider.setColour(juce::Slider::thumbColourId, audioProcessor.processorColors.fastLimit);
+
+    // Update non-processor slider colors with accent color
+    inputGainSlider.setColour(juce::Slider::thumbColourId, audioProcessor.processorColors.accent);
+    outputGainSlider.setColour(juce::Slider::thumbColourId, audioProcessor.processorColors.accent);
+    mixSlider.setColour(juce::Slider::thumbColourId, audioProcessor.processorColors.accent);
+    thresholdSlider.setColour(juce::Slider::thumbColourId, audioProcessor.processorColors.accent);
+    outputCeilingSlider.setColour(juce::Slider::thumbColourId, audioProcessor.processorColors.accent);
 
     // Update Undo/Redo button enabled states
     bool canUndo = audioProcessor.undoManager.canUndo();

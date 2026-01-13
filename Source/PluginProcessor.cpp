@@ -4010,6 +4010,7 @@ void QuadBlendDriveAudioProcessor::getStateInformation(juce::MemoryBlock& destDa
     xml->setAttribute("colorSoftClip", static_cast<int>(processorColors.softClip.getARGB()));
     xml->setAttribute("colorSlowLimit", static_cast<int>(processorColors.slowLimit.getARGB()));
     xml->setAttribute("colorFastLimit", static_cast<int>(processorColors.fastLimit.getARGB()));
+    xml->setAttribute("colorAccent", static_cast<int>(processorColors.accent.getARGB()));
 
     // Save preset slots as child elements
     for (int i = 0; i < 4; ++i)
@@ -4054,6 +4055,8 @@ void QuadBlendDriveAudioProcessor::setStateInformation(const void* data, int siz
             processorColors.slowLimit = juce::Colour(static_cast<uint32_t>(xmlState->getIntAttribute("colorSlowLimit")));
         if (xmlState->hasAttribute("colorFastLimit"))
             processorColors.fastLimit = juce::Colour(static_cast<uint32_t>(xmlState->getIntAttribute("colorFastLimit")));
+        if (xmlState->hasAttribute("colorAccent"))
+            processorColors.accent = juce::Colour(static_cast<uint32_t>(xmlState->getIntAttribute("colorAccent")));
 
         // Restore preset slots
         for (int i = 0; i < 4; ++i)

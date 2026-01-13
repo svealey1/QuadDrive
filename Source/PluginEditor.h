@@ -50,13 +50,14 @@ private:
 };
 
 // Custom XY Pad Component
-class XYPad : public juce::Component
+class XYPad : public juce::Component, private juce::Timer
 {
 public:
     XYPad(juce::AudioProcessorValueTreeState& apvts,
           const juce::String& xParamID,
           const juce::String& yParamID,
           QuadBlendDriveAudioProcessor& processor);
+    ~XYPad() override;
 
     void paint(juce::Graphics& g) override;
     void mouseDown(const juce::MouseEvent& event) override;
@@ -66,6 +67,7 @@ public:
     void resized() override;
 
 private:
+    void timerCallback() override;
     void updateParameters(juce::Point<float> position);
 
     juce::AudioProcessorValueTreeState& apvts;
@@ -118,10 +120,11 @@ private:
 };
 
 // Advanced DSP Parameters Panel
-class AdvancedPanel : public juce::Component
+class AdvancedPanel : public juce::Component, private juce::Timer
 {
 public:
-    AdvancedPanel(juce::AudioProcessorValueTreeState& apvts);
+    AdvancedPanel(juce::AudioProcessorValueTreeState& apvts, QuadBlendDriveAudioProcessor& processor);
+    ~AdvancedPanel() override;
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -130,7 +133,10 @@ public:
     bool isOpen() const { return getLocalBounds().getHeight() > 0; }
 
 private:
+    void timerCallback() override;
+
     juce::AudioProcessorValueTreeState& apvts;
+    QuadBlendDriveAudioProcessor& processor;
 
     // Section labels
     juce::Label softClipLabel, limitersLabel, compLabel;
@@ -287,6 +293,7 @@ private:
     ColorSwatchButton softClipColor{"Soft Clip", juce::Colour(0xffff963c)};
     ColorSwatchButton slowLimitColor{"Slow Limit", juce::Colour(0xffffdc50)};
     ColorSwatchButton fastLimitColor{"Fast Limit", juce::Colour(0xff50a0ff)};
+    ColorSwatchButton accentColor{"Accent", juce::Colour(0xff4a9eff)};
     juce::TextButton resetButton{"Reset to Defaults"};
 };
 
