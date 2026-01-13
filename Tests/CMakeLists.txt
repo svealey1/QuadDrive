@@ -55,3 +55,37 @@ set_target_properties(NullTest PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED YES
 )
+
+# Envelope Tests Executable
+add_executable(EnvelopeTests
+    EnvelopeTests.cpp
+    ../Source/DSP/EnvelopeFollower.h
+    ../Source/DSP/EnvelopeShaper.h
+)
+
+# Include directories
+target_include_directories(EnvelopeTests PRIVATE
+    ${CMAKE_SOURCE_DIR}/Source
+    ${CMAKE_SOURCE_DIR}/JUCE/modules
+)
+
+# Link against JUCE modules
+target_link_libraries(EnvelopeTests PRIVATE
+    juce::juce_audio_basics
+    juce::juce_audio_processors
+    juce::juce_core
+    juce::juce_dsp
+)
+
+# Compiler definitions
+target_compile_definitions(EnvelopeTests PRIVATE
+    JUCE_STANDALONE_APPLICATION=1
+    JUCE_USE_CURL=0
+    JUCE_WEB_BROWSER=0
+)
+
+# Set C++ standard
+set_target_properties(EnvelopeTests PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+)

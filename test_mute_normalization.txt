@@ -1,0 +1,21 @@
+Test Case: All Processors Muted + Normalization Enabled
+
+Setup:
+1. Enable normalization (set gain to +6 dB for example)
+2. Mute all 4 processors (HC, SC, SL, FL all muted)
+3. Set Mix to 100%
+4. Set Output Gain to 0 dB
+
+Expected Result:
+- Signal should pass through with +6 dB normalization gain applied
+
+Current Behavior (if bug exists):
+- Signal passes through without normalization gain (unity gain passthrough)
+
+Code Analysis:
+- Line 1097: buffer.applyGain(normGain) - normalization applied to buffer
+- Line 1106: originalInputBuffer.makeCopyOf(buffer) - captures AFTER norm
+- Line 1171: pristine = originalInputBuffer - should have normalization
+
+The bug might be in the comment/logic, not the actual code flow.
+Let me verify by adding explicit normalization handling.

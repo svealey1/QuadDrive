@@ -60,6 +60,7 @@ public:
     float getOutputPeakL() const { return juce::jlimit(0.0f, 2.0f, outputPeakL.load()); }
     float getOutputPeakR() const { return juce::jlimit(0.0f, 2.0f, outputPeakR.load()); }
 
+    juce::UndoManager undoManager;
     juce::AudioProcessorValueTreeState apvts;
 
     // Normalization state - exposed for UI
@@ -137,8 +138,8 @@ public:
         float fastLimitGainReduction = 0.0f;  // FL reduction (positive = reduction)
     };
 
-    // Ring buffer for real-time display capture (8192 samples ~= 170ms at 48kHz)
-    static constexpr int displayBufferSize = 8192;
+    // Ring buffer for real-time display capture (~4 seconds at 48kHz for long time bases)
+    static constexpr int displayBufferSize = 196608;  // 4.096 seconds at 48kHz
     std::array<DisplaySample, displayBufferSize> displayBuffer;
     std::atomic<int> displayWritePos{0};
 
@@ -146,8 +147,12 @@ public:
     // Each segment stores min/max envelope for accurate peak representation
     struct DecimatedSegment
     {
-        float waveformMin = 0.0f;     // Minimum waveform value in segment
-        float waveformMax = 0.0f;     // Maximum waveform value in segment
+        float waveformMin = 0.0f;     // Minimum waveform value in segment (legacy/combined)
+        float waveformMax = 0.0f;     // Maximum waveform value in segment (legacy/combined)
+        float waveformMinL = 0.0f;    // Left channel minimum
+        float waveformMaxL = 0.0f;    // Left channel maximum
+        float waveformMinR = 0.0f;    // Right channel minimum
+        float waveformMaxR = 0.0f;    // Right channel maximum
         float grMin = 0.0f;           // Minimum GR in segment (dB)
         float grMax = 0.0f;           // Maximum GR in segment (dB)
         float avgLow = 0.0f;          // Average low band energy
@@ -170,7 +175,7 @@ public:
         float fastLimitGRMin = 0.0f, fastLimitGRMax = 0.0f;
     };
 
-    static constexpr int decimatedDisplaySize = 512;  // 512 segments for GUI rendering
+    static constexpr int decimatedDisplaySize = 8192;  // 8192 segments for smooth GUI rendering
     std::array<DecimatedSegment, decimatedDisplaySize> decimatedDisplay;
     std::atomic<bool> decimatedDisplayReady{false};
 
@@ -178,6 +183,8 @@ public:
     std::atomic<bool> isPlaying{false};
     std::atomic<bool> wasPlaying{false};
     std::atomic<int64_t> playheadSamplePos{0};  // Sample position from host
+    std::atomic<double> currentBPM{120.0};      // Tempo from host (defaults to 120 BPM)
+    std::atomic<double> currentPPQPosition{0.0};  // PPQ position for beat-synced display
 
     // Display buffer write control
     std::atomic<bool> displayBufferFrozen{false};  // True when stopped
@@ -202,6 +209,7 @@ public:
     // Preset management (A, B, C, D)
     void savePreset(int slot);  // 0=A, 1=B, 2=C, 3=D
     void recallPreset(int slot);
+    void clearPreset(int slot);  // Clear/empty a preset slot
     bool hasPreset(int slot) const;
 
 private:
@@ -430,6 +438,11 @@ private:
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> smoothedInputGain;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> smoothedOutputGain;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedMixWet;
+
+    // AGC (Auto-Gain Compensation) - matches output loudness to input
+    std::atomic<float> agcInputRMS{0.0f};
+    std::atomic<float> agcOutputRMS{0.0f};
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> smoothedAgcGain;
 
     // Buffers for parallel processing (float)
     juce::AudioBuffer<float> dryBufferFloat;

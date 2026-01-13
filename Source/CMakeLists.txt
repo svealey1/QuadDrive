@@ -22,6 +22,7 @@ target_sources(STEVE
         StereoMeter.cpp
         ThresholdMeter.cpp
         WaveformGRMeter.cpp
+        STEVEScope.cpp
 )
 
 # Link JUCE modules

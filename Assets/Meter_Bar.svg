@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="60" height="400" viewBox="0 0 60 400" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Stereo Meter Bar -->
+  <!-- Background -->
+  <rect width="60" height="400" rx="4" fill="#1A1A1F"/>
+
+  <!-- Meter segments (draw from bottom up) -->
+  <defs>
+    <linearGradient id="meterGradient" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" style="stop-color:#00E676"/>
+      <stop offset="60%" style="stop-color:#00E676"/>
+      <stop offset="85%" style="stop-color:#FFD600"/>
+      <stop offset="95%" style="stop-color:#FF6B00"/>
+      <stop offset="100%" style="stop-color:#FF1744"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Meter fill (example at -10dB, about 70% full) -->
+  <rect x="5" y="120" width="50" height="275" rx="2" fill="url(#meterGradient)"/>
+
+  <!-- Tick marks -->
+  <g stroke="#3C3C41" stroke-width="1">
+    <line x1="0" y1="40" x2="10" y2="40"/>   <!-- 0 dB -->
+    <line x1="0" y1="120" x2="10" y2="120"/> <!-- -6 dB -->
+    <line x1="0" y1="200" x2="10" y2="200"/> <!-- -12 dB -->
+    <line x1="0" y1="280" x2="10" y2="280"/> <!-- -18 dB -->
+    <line x1="0" y1="360" x2="10" y2="360"/> <!-- -24 dB -->
+  </g>
+
+  <!-- Border -->
+  <rect x="0.5" y="0.5" width="59" height="399" rx="3.5" stroke="#3C3C41" stroke-width="1"/>
+</svg>

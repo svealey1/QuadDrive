@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="600" height="200" viewBox="0 0 600 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- S.T.E.V.E. Logo -->
+  <text x="300" y="100" font-family="Arial, sans-serif" font-size="72" font-weight="bold" fill="#FFFFFF" text-anchor="middle">
+    S.T.E.V.E.
+  </text>
+  <text x="300" y="140" font-family="Arial, sans-serif" font-size="18" fill="#B4B4BE" text-anchor="middle">
+    Signal Transfer Enhanced Volume Engine
+  </text>
+</svg>

@@ -242,40 +242,117 @@ public:
     void drawToggleButton(juce::Graphics& g, juce::ToggleButton& button,
                           bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override
     {
+        juce::ignoreUnused(shouldDrawButtonAsDown);
         auto bounds = button.getLocalBounds().toFloat();
-        const float tickSize = juce::jmin(16.0f, bounds.getHeight() - 4.0f);
+        auto buttonText = button.getButtonText();
 
-        // Checkbox bounds
-        juce::Rectangle<float> tickBounds(bounds.getX() + 2.0f, bounds.getCentreY() - tickSize * 0.5f,
-                                          tickSize, tickSize);
+        // Get the button's tick color - check if a custom color was set on this specific button
+        // If yes, use it; otherwise fall back to default accent blue
+        juce::Colour tickColour = button.isColourSpecified(juce::ToggleButton::tickColourId)
+            ? button.findColour(juce::ToggleButton::tickColourId)
+            : juce::Colour(accentBlue);
 
-        // Background
-        g.setColour(juce::Colour(backgroundPanel));
-        g.fillRoundedRectangle(tickBounds, 3.0f);
+        juce::Colour offColour = button.isColourSpecified(juce::ToggleButton::tickDisabledColourId)
+            ? button.findColour(juce::ToggleButton::tickDisabledColourId)
+            : juce::Colour(backgroundPanel);
 
-        // Outline
-        g.setColour(shouldDrawButtonAsHighlighted ? juce::Colour(accentBlue) : juce::Colour(outline));
-        g.drawRoundedRectangle(tickBounds, 3.0f, 1.0f);
+        // Check if this is a single-letter M or S button (mute/solo style)
+        bool isMuteOrSoloButton = (buttonText == "M" || buttonText == "S");
 
-        // Checkmark
-        if (button.getToggleState())
+        if (isMuteOrSoloButton)
         {
-            g.setColour(juce::Colour(accentBlue));
-            juce::Path tick;
-            tick.startNewSubPath(tickBounds.getX() + tickSize * 0.2f, tickBounds.getCentreY());
-            tick.lineTo(tickBounds.getX() + tickSize * 0.4f, tickBounds.getBottom() - tickSize * 0.25f);
-            tick.lineTo(tickBounds.getRight() - tickSize * 0.2f, tickBounds.getY() + tickSize * 0.25f);
-            g.strokePath(tick, juce::PathStrokeType(2.5f));
-        }
+            // Draw as a filled button with the letter centered
+            auto buttonBounds = bounds.reduced(1.0f);
 
-        // Label
-        g.setColour(juce::Colour(textPrimary));
-        g.drawFittedText(button.getButtonText(),
-                        juce::Rectangle<int>(static_cast<int>(tickBounds.getRight() + 6.0f),
-                                            static_cast<int>(bounds.getY()),
-                                            static_cast<int>(bounds.getWidth() - tickBounds.getRight() - 6.0f),
-                                            static_cast<int>(bounds.getHeight())),
-                        juce::Justification::centredLeft, 1);
+            // Background - clearly different between ON and OFF states
+            if (button.getToggleState())
+            {
+                // ON: Fully filled with the tick color
+                g.setColour(tickColour);
+                g.fillRoundedRectangle(buttonBounds, 3.0f);
+            }
+            else
+            {
+                // OFF: Dark transparent background - clearly "empty" looking
+                g.setColour(juce::Colour(0x20ffffff));  // Very subtle white tint
+                g.fillRoundedRectangle(buttonBounds, 3.0f);
+
+                // Subtle highlight on hover
+                if (shouldDrawButtonAsHighlighted)
+                {
+                    g.setColour(tickColour.withAlpha(0.2f));
+                    g.fillRoundedRectangle(buttonBounds, 3.0f);
+                }
+            }
+
+            // Outline - more prominent when OFF to show button boundary
+            if (button.getToggleState())
+                g.setColour(tickColour.brighter(0.2f));
+            else if (shouldDrawButtonAsHighlighted)
+                g.setColour(tickColour.withAlpha(0.6f));
+            else
+                g.setColour(juce::Colour(0xff505050));  // Brighter outline when OFF
+            g.drawRoundedRectangle(buttonBounds, 3.0f, 1.0f);
+
+            // Text - white/bright on active, dimmed on inactive
+            if (button.getToggleState())
+                g.setColour(juce::Colours::white);
+            else
+                g.setColour(juce::Colour(0xff808080));  // Gray when OFF
+
+            g.setFont(juce::Font(12.0f, juce::Font::bold));
+            g.drawText(buttonText, buttonBounds, juce::Justification::centred);
+        }
+        else
+        {
+            // Standard checkbox-style toggle for other toggle buttons
+            const float tickSize = juce::jmin(16.0f, bounds.getHeight() - 4.0f);
+
+            // Checkbox bounds
+            juce::Rectangle<float> tickBounds(bounds.getX() + 2.0f, bounds.getCentreY() - tickSize * 0.5f,
+                                              tickSize, tickSize);
+
+            // Background - use tick color when on for filled button effect
+            if (button.getToggleState())
+            {
+                g.setColour(tickColour.withAlpha(0.2f));
+                g.fillRoundedRectangle(tickBounds, 3.0f);
+            }
+            else
+            {
+                g.setColour(juce::Colour(backgroundPanel));
+                g.fillRoundedRectangle(tickBounds, 3.0f);
+            }
+
+            // Outline - use tick color when on or highlighted
+            if (button.getToggleState())
+                g.setColour(tickColour);
+            else if (shouldDrawButtonAsHighlighted)
+                g.setColour(tickColour.withAlpha(0.6f));
+            else
+                g.setColour(juce::Colour(outline));
+            g.drawRoundedRectangle(tickBounds, 3.0f, 1.0f);
+
+            // Checkmark - use button's tick color
+            if (button.getToggleState())
+            {
+                g.setColour(tickColour);
+                juce::Path tick;
+                tick.startNewSubPath(tickBounds.getX() + tickSize * 0.2f, tickBounds.getCentreY());
+                tick.lineTo(tickBounds.getX() + tickSize * 0.4f, tickBounds.getBottom() - tickSize * 0.25f);
+                tick.lineTo(tickBounds.getRight() - tickSize * 0.2f, tickBounds.getY() + tickSize * 0.25f);
+                g.strokePath(tick, juce::PathStrokeType(2.5f));
+            }
+
+            // Label - use tick color when on
+            g.setColour(button.getToggleState() ? tickColour : juce::Colour(textPrimary));
+            g.drawFittedText(buttonText,
+                            juce::Rectangle<int>(static_cast<int>(tickBounds.getRight() + 6.0f),
+                                                static_cast<int>(bounds.getY()),
+                                                static_cast<int>(bounds.getWidth() - tickBounds.getRight() - 6.0f),
+                                                static_cast<int>(bounds.getHeight())),
+                            juce::Justification::centredLeft, 1);
+        }
     }
 
     juce::Label* createSliderTextBox(juce::Slider& slider) override

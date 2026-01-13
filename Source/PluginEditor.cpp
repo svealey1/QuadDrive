@@ -1,6 +1,9 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+// Version string - update this single location for all version displays
+static const juce::String kPluginVersion = "1.8.6";
+
 //=============================================================================
 
 //==============================================================================
@@ -290,8 +293,7 @@ void Oscilloscope::paint(juce::Graphics& g)
             }
         }
 
-        // Draw colored segments based on RGB frequency content
-        // Sample colors at regular intervals for smoother appearance
+        // Draw filled waveform with RGB coloring - fill between waveform and zero line
         const int colorSegments = juce::jmin(200, displayPoints / 4);
         for (int seg = 0; seg < colorSegments; ++seg)
         {
@@ -302,32 +304,33 @@ void Oscilloscope::paint(juce::Graphics& g)
                 continue;
 
             int bufferIndex = (startIdx * bufferSize) / displayPoints;
-            int readPos = bufferIndex;  // Still window: read directly from buffer position
+            int readPos = bufferIndex;
 
             if (readPos >= 0 && readPos < bufferSize)
             {
                 // Get three-band amplitudes for RGB coloring
-                float lowAmp = processor.oscilloscopeLowBand[readPos];     // Red channel
-                float midAmp = processor.oscilloscopeMidBand[readPos];     // Green channel
-                float highAmp = processor.oscilloscopeHighBand[readPos];   // Blue channel
+                float lowAmp = processor.oscilloscopeLowBand[readPos];
+                float midAmp = processor.oscilloscopeMidBand[readPos];
+                float highAmp = processor.oscilloscopeHighBand[readPos];
 
                 // Full brightness - scale values directly to 0-255 range
-                // Use higher scale factor to ensure vibrant colors
                 float colorScale = 4.0f;
                 uint8_t red = static_cast<uint8_t>(juce::jlimit(0.0f, 255.0f, lowAmp * colorScale * 255.0f));
                 uint8_t green = static_cast<uint8_t>(juce::jlimit(0.0f, 255.0f, midAmp * colorScale * 255.0f));
                 uint8_t blue = static_cast<uint8_t>(juce::jlimit(0.0f, 255.0f, highAmp * colorScale * 255.0f));
 
-                // Create full brightness color - no dimming or adjustments
                 juce::Colour lineColor(red, green, blue);
 
-                // Create segment path
-                juce::Path segmentPath;
-                bool segStarted = false;
+                // Create filled path from waveform to center line
+                juce::Path fillPath;
+                juce::Path strokePath;
+                bool pathStarted = false;
+                float firstX = 0, lastX = 0;
+
                 for (int i = startIdx; i <= endIdx && i < displayPoints; ++i)
                 {
                     int bufIdx = (i * bufferSize) / displayPoints;
-                    int rPos = bufIdx;  // Still window: read directly from buffer position
+                    int rPos = bufIdx;
 
                     if (rPos >= 0 && rPos < bufferSize)
                     {
@@ -336,21 +339,37 @@ void Oscilloscope::paint(juce::Graphics& g)
                         float y = centerY - (sample * graphBounds.getHeight() * 0.4f);
                         y = juce::jlimit(graphBounds.getY(), graphBounds.getBottom(), y);
 
-                        if (!segStarted)
+                        if (!pathStarted)
                         {
-                            segmentPath.startNewSubPath(x, y);
-                            segStarted = true;
+                            fillPath.startNewSubPath(x, centerY);  // Start at center line
+                            fillPath.lineTo(x, y);  // Go to waveform
+                            strokePath.startNewSubPath(x, y);
+                            firstX = x;
+                            pathStarted = true;
                         }
                         else
                         {
-                            segmentPath.lineTo(x, y);
+                            fillPath.lineTo(x, y);
+                            strokePath.lineTo(x, y);
                         }
+                        lastX = x;
                     }
                 }
 
-                // Draw waveform with full brightness - no glow or shading
-                g.setColour(lineColor);
-                g.strokePath(segmentPath, juce::PathStrokeType(2.0f * scale, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                // Close the fill path back to center line
+                if (pathStarted)
+                {
+                    fillPath.lineTo(lastX, centerY);  // Go back to center line
+                    fillPath.closeSubPath();
+
+                    // Draw semi-transparent fill
+                    g.setColour(lineColor.withAlpha(0.3f));
+                    g.fillPath(fillPath);
+
+                    // Draw the stroke on top
+                    g.setColour(lineColor);
+                    g.strokePath(strokePath, juce::PathStrokeType(2.0f * scale, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                }
             }
         }
 
@@ -391,7 +410,8 @@ void Oscilloscope::paintGRTrace(juce::Graphics& g, juce::Rectangle<float> graphB
     const float grDisplayRangeDb = 24.0f;  // Max GR depth to display
     const float pixelsPerDb = height / maxDisplayDb;
 
-    const float thresholdDb = processor.apvts.getRawParameterValue("THRESHOLD")->load();
+    auto* thresholdParam = processor.apvts.getRawParameterValue("THRESHOLD");
+    const float thresholdDb = thresholdParam ? thresholdParam->load() : -6.0f;
 
     // 0 dBFS at TOP of waveform display (top 0 dBFS reference line is at 10% from top)
     const float zeroDbY = graphBounds.getY() + graphBounds.getHeight() * 0.1f;
@@ -601,6 +621,14 @@ void XYPad::mouseUp(const juce::MouseEvent& event)
     }
 }
 
+void XYPad::mouseDoubleClick(const juce::MouseEvent& event)
+{
+    // Reset XY pad to center position (0.5, 0.5)
+    xSlider.setValue(0.5, juce::sendNotificationAsync);
+    ySlider.setValue(0.5, juce::sendNotificationAsync);
+    repaint();
+}
+
 void XYPad::resized()
 {
     repaint();
@@ -632,13 +660,13 @@ CalibrationPanel::CalibrationPanel(juce::AudioProcessorValueTreeState& apvts, Qu
     calibLevelSlider.setDoubleClickReturnValue(true, 0.0);
     addAndMakeVisible(calibLevelSlider);
 
-    calibLevelLabel.setText("Calib", juce::dontSendNotification);
+    calibLevelLabel.setText("Calibration", juce::dontSendNotification);
     calibLevelLabel.setJustificationType(juce::Justification::centred);
     calibLevelLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.75f));
     addAndMakeVisible(calibLevelLabel);
 
-    // Analyze Button
-    analyzeButton.setButtonText("ANALYZE");
+    // Learn Button (was Analyze)
+    analyzeButton.setButtonText("LEARN");
     analyzeButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
     analyzeButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
     analyzeButton.onClick = [this, &proc = this->processor]()
@@ -646,7 +674,7 @@ CalibrationPanel::CalibrationPanel(juce::AudioProcessorValueTreeState& apvts, Qu
         if (proc.isAnalyzing.load())
         {
             proc.stopAnalysis();
-            analyzeButton.setButtonText("ANALYZE");
+            analyzeButton.setButtonText("LEARN");
         }
         else
         {
@@ -656,8 +684,8 @@ CalibrationPanel::CalibrationPanel(juce::AudioProcessorValueTreeState& apvts, Qu
     };
     addAndMakeVisible(analyzeButton);
 
-    // Normalize Button
-    normalizeButton.setButtonText("NORMALIZE");
+    // Apply Button (was Normalize)
+    normalizeButton.setButtonText("APPLY");
     normalizeButton.setClickingTogglesState(true);
     normalizeButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
     normalizeButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(255, 120, 50));
@@ -680,7 +708,7 @@ CalibrationPanel::CalibrationPanel(juce::AudioProcessorValueTreeState& apvts, Qu
     {
         proc.resetNormalizationData();
         normalizeButton.setToggleState(false, juce::dontSendNotification);
-        analyzeButton.setButtonText("ANALYZE");
+        analyzeButton.setButtonText("LEARN");
     };
     addAndMakeVisible(resetNormButton);
 
@@ -735,13 +763,13 @@ void CalibrationPanel::resized()
     calibLevelSlider.setBounds(row1);
     bounds.removeFromTop(10);
 
-    // Row 2: Buttons (20% wider than 50% size)
+    // Row 2: Buttons - sized to fit text
     auto row2 = bounds.removeFromTop(25);
-    analyzeButton.setBounds(row2.removeFromLeft(48));  // 40 * 1.2
+    analyzeButton.setBounds(row2.removeFromLeft(55));  // Fits "LEARN"
     row2.removeFromLeft(5);
-    normalizeButton.setBounds(row2.removeFromLeft(58));  // 48 * 1.2
+    normalizeButton.setBounds(row2.removeFromLeft(50));  // Fits "APPLY"
     row2.removeFromLeft(5);
-    resetNormButton.setBounds(row2.removeFromLeft(40));  // 33 * 1.2
+    resetNormButton.setBounds(row2.removeFromLeft(50));  // Fits "RESET"
     bounds.removeFromTop(10);
 
     // Row 3: Input Peak
@@ -1065,7 +1093,7 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
       xyPad(p.apvts, "XY_X_PARAM", "XY_Y_PARAM", p),
       calibrationPanel(p.apvts, p),
       advancedPanel(p.apvts),
-      oscilloscope(p),
+      steveScope(p),
       transferCurveMeter(p),  // Transfer curve with level meter
       inputMeter(p, true),    // Stereo input meter
       outputMeter(p, false)   // Stereo output meter
@@ -1073,15 +1101,15 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     // Apply custom look and feel
     setLookAndFeel(&lookAndFeel);
 
-    setSize(950, 850);  // Default size
+    setSize(950, 600);  // Default size - compact, scope/advanced panels expand below
     setResizable(true, true);
-    setResizeLimits(800, 600, 1900, 1700);  // Min 800x600, Max 2x default size
+    setResizeLimits(800, 600, 1900, 1200);  // Min 800x600, Max with panels expanded
 
     // Setup XY Pad
     addAndMakeVisible(xyPad);
 
     // Setup Visualizations (these go first so panels can overlay)
-    addAndMakeVisible(oscilloscope);
+    addChildComponent(steveScope);          // Hidden by default - shown when SCOPE is clicked
     addChildComponent(transferCurveMeter);  // Transfer curve with level meter (hidden by default)
     addAndMakeVisible(inputMeter);          // Stereo input meter
     addAndMakeVisible(outputMeter);         // Stereo output meter
@@ -1097,8 +1125,8 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     };
     addAndMakeVisible(transferCurveToggleButton);
 
-    // Setup Calibration Panel
-    calibrationToggleButton.setButtonText("CALIBRATION");
+    // Setup Learn Panel (Calibration)
+    calibrationToggleButton.setButtonText("LEARN");
     calibrationToggleButton.setClickingTogglesState(false);
     calibrationToggleButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
     calibrationToggleButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
@@ -1111,12 +1139,354 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     // Note: Button text and colors are dynamically updated in timerCallback() based on normalization state
     // CalibrationPanel added at end of constructor to appear on top
 
-    // Setup Advanced Panel (added AFTER waveform so it appears on top)
+    // === TOOLBAR COMPONENTS ===
+    // Preset Menu Button (dropdown for preset management)
+    presetMenuButton.setButtonText("Default Setting");
+    presetMenuButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
+    presetMenuButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
+    presetMenuButton.onClick = [this]()
+    {
+        juce::PopupMenu menu;
+
+        // Initialize to Default
+        menu.addItem(1, "Initialize to Default");
+        menu.addSeparator();
+
+        // Save/Load
+        menu.addItem(2, "Save Preset...");
+        menu.addItem(3, "Save Preset As...");
+        menu.addItem(4, "Load Preset...");
+        menu.addSeparator();
+
+        // Copy/Paste State
+        menu.addItem(5, "Copy State");
+        menu.addItem(6, "Paste State");
+        menu.addSeparator();
+
+        // A/B Compare submenu
+        juce::PopupMenu abMenu;
+        abMenu.addItem(10, "Copy to A");
+        abMenu.addItem(11, "Copy to B");
+        abMenu.addItem(12, "Copy to C");
+        abMenu.addItem(13, "Copy to D");
+        abMenu.addSeparator();
+        abMenu.addItem(14, "Swap A <-> B");
+        abMenu.addItem(15, "Swap C <-> D");
+        menu.addSubMenu("A/B Compare", abMenu);
+
+        menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&presetMenuButton),
+            [this](int result)
+            {
+                switch (result)
+                {
+                    case 1: // Initialize to Default
+                    {
+                        // Reset all parameters to default values
+                        for (auto* param : audioProcessor.apvts.processor.getParameters())
+                        {
+                            if (auto* rangedParam = dynamic_cast<juce::RangedAudioParameter*>(param))
+                                rangedParam->setValueNotifyingHost(rangedParam->getDefaultValue());
+                        }
+                        presetMenuButton.setButtonText("Default Setting");
+                        currentPresetPath = juce::File();
+                        break;
+                    }
+                    case 2: // Save Preset
+                    case 3: // Save Preset As
+                    {
+                        bool saveAs = (result == 3) || !currentPresetPath.existsAsFile();
+                        if (saveAs)
+                        {
+                            fileChooser = std::make_unique<juce::FileChooser>(
+                                "Save Preset",
+                                juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
+                                "*.bjpreset");
+
+                            fileChooser->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles,
+                                [this](const juce::FileChooser& fc)
+                                {
+                                    auto file = fc.getResult();
+                                    if (file != juce::File())
+                                    {
+                                        auto state = audioProcessor.apvts.copyState();
+                                        auto xml = state.createXml();
+                                        if (xml != nullptr)
+                                        {
+                                            auto fileToWrite = file.withFileExtension(".bjpreset");
+                                            xml->writeTo(fileToWrite);
+                                            currentPresetPath = fileToWrite;
+                                            presetMenuButton.setButtonText(fileToWrite.getFileNameWithoutExtension());
+                                        }
+                                    }
+                                });
+                        }
+                        else
+                        {
+                            auto state = audioProcessor.apvts.copyState();
+                            auto xml = state.createXml();
+                            if (xml != nullptr)
+                                xml->writeTo(currentPresetPath);
+                        }
+                        break;
+                    }
+                    case 4: // Load Preset
+                    {
+                        fileChooser = std::make_unique<juce::FileChooser>(
+                            "Load Preset",
+                            juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
+                            "*.bjpreset");
+
+                        fileChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                            [this](const juce::FileChooser& fc)
+                            {
+                                auto file = fc.getResult();
+                                if (file.existsAsFile())
+                                {
+                                    auto xml = juce::XmlDocument::parse(file);
+                                    if (xml != nullptr)
+                                    {
+                                        auto state = juce::ValueTree::fromXml(*xml);
+                                        if (state.isValid())
+                                        {
+                                            audioProcessor.apvts.replaceState(state);
+                                            currentPresetPath = file;
+                                            presetMenuButton.setButtonText(file.getFileNameWithoutExtension());
+                                        }
+                                    }
+                                }
+                            });
+                        break;
+                    }
+                    case 5: // Copy State
+                    {
+                        auto state = audioProcessor.apvts.copyState();
+                        auto xml = state.createXml();
+                        if (xml != nullptr)
+                            juce::SystemClipboard::copyTextToClipboard(xml->toString());
+                        break;
+                    }
+                    case 6: // Paste State
+                    {
+                        auto clipText = juce::SystemClipboard::getTextFromClipboard();
+                        auto xml = juce::XmlDocument::parse(clipText);
+                        if (xml != nullptr)
+                        {
+                            auto state = juce::ValueTree::fromXml(*xml);
+                            if (state.isValid())
+                            {
+                                audioProcessor.apvts.replaceState(state);
+                                presetMenuButton.setButtonText("(Pasted)");
+                                currentPresetPath = juce::File();
+                            }
+                        }
+                        break;
+                    }
+                    case 10: audioProcessor.savePreset(0); break;  // Copy to A
+                    case 11: audioProcessor.savePreset(1); break;  // Copy to B
+                    case 12: audioProcessor.savePreset(2); break;  // Copy to C
+                    case 13: audioProcessor.savePreset(3); break;  // Copy to D
+                    case 14: // Swap A <-> B
+                    {
+                        auto tempA = audioProcessor.hasPreset(0) ? juce::ValueTree() : juce::ValueTree();
+                        // Save current A, copy B to A, restore old A to B
+                        juce::ValueTree slotA, slotB;
+                        if (audioProcessor.hasPreset(0))
+                        {
+                            audioProcessor.recallPreset(0);
+                            slotA = audioProcessor.apvts.copyState();
+                        }
+                        if (audioProcessor.hasPreset(1))
+                        {
+                            audioProcessor.recallPreset(1);
+                            slotB = audioProcessor.apvts.copyState();
+                        }
+                        // Now swap
+                        if (slotB.isValid()) { audioProcessor.apvts.replaceState(slotB); audioProcessor.savePreset(0); }
+                        if (slotA.isValid()) { audioProcessor.apvts.replaceState(slotA); audioProcessor.savePreset(1); }
+                        break;
+                    }
+                    case 15: // Swap C <-> D
+                    {
+                        juce::ValueTree slotC, slotD;
+                        if (audioProcessor.hasPreset(2))
+                        {
+                            audioProcessor.recallPreset(2);
+                            slotC = audioProcessor.apvts.copyState();
+                        }
+                        if (audioProcessor.hasPreset(3))
+                        {
+                            audioProcessor.recallPreset(3);
+                            slotD = audioProcessor.apvts.copyState();
+                        }
+                        if (slotD.isValid()) { audioProcessor.apvts.replaceState(slotD); audioProcessor.savePreset(2); }
+                        if (slotC.isValid()) { audioProcessor.apvts.replaceState(slotC); audioProcessor.savePreset(3); }
+                        break;
+                    }
+                    default:
+                        break;
+                }
+            });
+    };
+    addAndMakeVisible(presetMenuButton);
+
+    // Undo Button
+    undoButton.setButtonText("Undo");
+    undoButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
+    undoButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.5f));
+    undoButton.onClick = [this]()
+    {
+        if (audioProcessor.undoManager.canUndo())
+        {
+            audioProcessor.undoManager.undo();
+        }
+    };
+    addAndMakeVisible(undoButton);
+
+    // Redo Button
+    redoButton.setButtonText("Redo");
+    redoButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
+    redoButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.5f));
+    redoButton.onClick = [this]()
+    {
+        if (audioProcessor.undoManager.canRedo())
+        {
+            audioProcessor.undoManager.redo();
+        }
+    };
+    addAndMakeVisible(redoButton);
+
+    // Help Button - shows quick reference
+    helpButton.setButtonText("?");
+    helpButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
+    helpButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
+    helpButton.onClick = [this]()
+    {
+        juce::PopupMenu helpMenu;
+        helpMenu.addSectionHeader("Bongo Juice - Quick Reference");
+        helpMenu.addSeparator();
+
+        // XY Pad section
+        juce::PopupMenu xyMenu;
+        xyMenu.addItem(100, "HC (Hard Clip) - Top Left", false, false);
+        xyMenu.addItem(101, "FL (Fast Limit) - Top Right", false, false);
+        xyMenu.addItem(102, "SC (Soft Clip) - Bottom Left", false, false);
+        xyMenu.addItem(103, "SL (Slow Limit) - Bottom Right", false, false);
+        xyMenu.addSeparator();
+        xyMenu.addItem(104, "Double-click: Reset to center", false, false);
+        xyMenu.addItem(105, "Cmd+drag: Temporary delta mode", false, false);
+        helpMenu.addSubMenu("XY Pad", xyMenu);
+
+        // Quick Presets section
+        juce::PopupMenu presetMenu;
+        presetMenu.addItem(200, "Click empty slot: Save current settings", false, false);
+        presetMenu.addItem(201, "Click saved slot: Recall preset", false, false);
+        presetMenu.addItem(202, "Cmd+Click: Overwrite slot", false, false);
+        presetMenu.addItem(203, "Opt+Click: Clear slot", false, false);
+        helpMenu.addSubMenu("A/B/C/D Presets", presetMenu);
+
+        // Controls section
+        juce::PopupMenu controlsMenu;
+        controlsMenu.addItem(300, "Input: Pre-saturation gain", false, false);
+        controlsMenu.addItem(301, "Threshold: Saturation onset level", false, false);
+        controlsMenu.addItem(302, "Output: Post-saturation gain", false, false);
+        controlsMenu.addItem(303, "Mix: Dry/Wet blend", false, false);
+        controlsMenu.addItem(304, "Ceiling: Output limiter ceiling", false, false);
+        controlsMenu.addSeparator();
+        controlsMenu.addItem(305, "LINK I/O: Gangs input/output knobs", false, false);
+        controlsMenu.addItem(306, "BYPASS: True bypass", false, false);
+        controlsMenu.addItem(307, "DELTA: Hear only the saturation", false, false);
+        helpMenu.addSubMenu("Controls", controlsMenu);
+
+        // Processors section
+        juce::PopupMenu procMenu;
+        procMenu.addItem(400, "HC: Hard clipper (aggressive)", false, false);
+        procMenu.addItem(401, "SC: Soft clipper (smooth)", false, false);
+        procMenu.addItem(402, "SL: Slow limiter (pumping)", false, false);
+        procMenu.addItem(403, "FL: Fast limiter (transparent)", false, false);
+        procMenu.addSeparator();
+        procMenu.addItem(404, "M button: Mute processor", false, false);
+        procMenu.addItem(405, "S button: Solo processor", false, false);
+        procMenu.addItem(406, "Trim knobs: Per-processor gain", false, false);
+        helpMenu.addSubMenu("Processors", procMenu);
+
+        // Engine modes section
+        juce::PopupMenu engineMenu;
+        engineMenu.addItem(500, "Zero Latency: No latency, basic quality", false, false);
+        engineMenu.addItem(501, "Balanced: Low latency, good quality", false, false);
+        engineMenu.addItem(502, "Linear Phase: Higher latency, best quality", false, false);
+        helpMenu.addSubMenu("Engine Modes", engineMenu);
+
+        // Learn section
+        juce::PopupMenu learnMenu;
+        learnMenu.addItem(600, "LEARN: Analyze input level", false, false);
+        learnMenu.addItem(601, "APPLY: Apply gain compensation", false, false);
+        learnMenu.addItem(602, "RESET: Clear learned data", false, false);
+        helpMenu.addSubMenu("Learn Panel", learnMenu);
+
+        helpMenu.addSeparator();
+        helpMenu.addItem(900, "Version: " + kPluginVersion);
+
+        helpMenu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&helpButton));
+    };
+    addAndMakeVisible(helpButton);
+
+    // Scope Toggle Button - expands window to show oscilloscope below 600px
+    scopeToggleButton.setButtonText("SCOPE");
+    scopeToggleButton.setClickingTogglesState(true);
+    scopeToggleButton.setToggleState(false, juce::dontSendNotification);  // Scope hidden by default
+    scopeToggleButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
+    scopeToggleButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(50, 150, 255));
+    scopeToggleButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.6f));
+    scopeToggleButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+    scopeToggleButton.onClick = [this]() {
+        const int baseHeight = 600;
+        const int scopeHeight = 300;  // Height added for scope
+
+        if (scopeToggleButton.getToggleState())
+        {
+            // Expand window to show scope
+            steveScope.setVisible(true);
+            setSize(getWidth(), baseHeight + scopeHeight);
+        }
+        else
+        {
+            // Collapse window, hide scope
+            steveScope.setVisible(false);
+            // Only shrink if advanced panel is also hidden
+            if (!advancedPanel.isVisible())
+                setSize(getWidth(), baseHeight);
+        }
+        resized();
+    };
+    addAndMakeVisible(scopeToggleButton);
+
+    // Setup Advanced Panel - expands window to show panel below 600px
     advancedToggleButton.setButtonText("ADVANCED");
-    advancedToggleButton.setClickingTogglesState(false);
+    advancedToggleButton.setClickingTogglesState(true);
+    advancedToggleButton.setToggleState(false, juce::dontSendNotification);
+    advancedToggleButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
+    advancedToggleButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(50, 150, 255));
+    advancedToggleButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.6f));
+    advancedToggleButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
     advancedToggleButton.onClick = [this]() {
-        advancedPanel.setVisible(!advancedPanel.isVisible());
-        resized();  // Re-layout when panel visibility changes
+        const int baseHeight = 600;
+        const int advancedHeight = 350;  // Height added for advanced panel
+
+        if (advancedToggleButton.getToggleState())
+        {
+            // Expand window to show advanced panel
+            advancedPanel.setVisible(true);
+            setSize(getWidth(), baseHeight + advancedHeight);
+        }
+        else
+        {
+            // Collapse window, hide advanced panel
+            advancedPanel.setVisible(false);
+            // Only shrink if scope is also hidden
+            if (!steveScope.isVisible())
+                setSize(getWidth(), baseHeight);
+        }
+        resized();
     };
     addAndMakeVisible(advancedToggleButton);
     addChildComponent(advancedPanel);  // Use addChildComponent to keep panel hidden initially
@@ -1142,12 +1512,12 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     // Threshold Control (Calib moved to CalibrationPanel)
     setupRotarySlider(thresholdSlider, thresholdLabel, "Thresh");
 
-    // Threshold Link Button - Toggle between automatic tracking and manual control
-    thresholdLinkButton.setButtonText("LINK");
+    // CAL Button - Links threshold to calibration level (auto-tracking)
+    thresholdLinkButton.setButtonText("CAL");
     thresholdLinkButton.setClickingTogglesState(true);
     thresholdLinkButton.setToggleState(true, juce::dontSendNotification);  // Default ON
     thresholdLinkButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
-    thresholdLinkButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(50, 150, 255));  // Blue when linked
+    thresholdLinkButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(255, 140, 60));  // Orange when linked (matches calibration)
     thresholdLinkButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.6f));
     thresholdLinkButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
     addAndMakeVisible(thresholdLinkButton);
@@ -1219,7 +1589,8 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     deltaModeButton.onClick = [this]()
     {
         // Read current delta mode state (after toggle)
-        bool deltaModeOn = audioProcessor.apvts.getRawParameterValue("DELTA_MODE")->load() > 0.5f;
+        auto* deltaModeParam = audioProcessor.apvts.getRawParameterValue("DELTA_MODE");
+        bool deltaModeOn = deltaModeParam ? deltaModeParam->load() > 0.5f : false;
 
         // Sync Master Comp to match Delta Mode
         if (auto* masterCompParam = audioProcessor.apvts.getParameter("MASTER_COMP"))
@@ -1358,20 +1729,75 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
                                      "• Recommended for streaming/broadcast");
     addAndMakeVisible(truePeakEnableButton);
 
-    // Setup Preset Buttons (A, B, C, D) - Modern styling
+    // Setup Preset Buttons (A, B, C, D)
+    // Click = Recall, Cmd+Click = Save, Opt+Click = Clear
     auto setupPresetButton = [this](juce::TextButton& recallBtn, juce::TextButton& saveBtn, const juce::String& label, int slot)
     {
         recallBtn.setButtonText(label);
         recallBtn.setColour(juce::TextButton::buttonColourId, juce::Colour(45, 45, 52));
-        recallBtn.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.9f));
-        recallBtn.onClick = [this, slot] { audioProcessor.recallPreset(slot); };
+        recallBtn.setColour(juce::TextButton::buttonOnColourId, juce::Colour(80, 140, 200));  // Blue when active
+        recallBtn.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.6f));  // Dim when empty
+        recallBtn.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+        recallBtn.setClickingTogglesState(false);  // We manage toggle state manually
+        recallBtn.setTooltip("Click: Save (empty) / Recall (saved)\nCmd+Click: Overwrite " + label + "\nOpt+Click: Clear " + label);
+
+        recallBtn.onClick = [this, slot, &recallBtn]
+        {
+            auto mods = juce::ModifierKeys::getCurrentModifiers();
+
+            if (mods.isAltDown())
+            {
+                // Opt+Click = Clear this preset slot
+                audioProcessor.clearPreset(slot);
+                if (currentABCDSlot == slot)
+                    currentABCDSlot = -1;
+                // Visual feedback - red flash then dim
+                recallBtn.setColour(juce::TextButton::buttonColourId, juce::Colour(180, 60, 60));
+                juce::Timer::callAfterDelay(200, [&recallBtn]() {
+                    recallBtn.setColour(juce::TextButton::buttonColourId, juce::Colour(45, 45, 52));
+                });
+                updateABCDButtonStates();
+            }
+            else if (mods.isCommandDown())
+            {
+                // Cmd+Click = Save current state to this slot
+                audioProcessor.savePreset(slot);
+                currentABCDSlot = slot;
+                // Visual feedback - green flash
+                recallBtn.setColour(juce::TextButton::buttonColourId, juce::Colour(80, 180, 80));
+                juce::Timer::callAfterDelay(200, [&recallBtn]() {
+                    recallBtn.setColour(juce::TextButton::buttonColourId, juce::Colour(45, 45, 52));
+                });
+                updateABCDButtonStates();
+            }
+            else
+            {
+                // Click behavior depends on whether preset exists
+                if (audioProcessor.hasPreset(slot))
+                {
+                    // Slot has preset - recall it
+                    audioProcessor.recallPreset(slot);
+                    currentABCDSlot = slot;
+                    updateABCDButtonStates();
+                }
+                else
+                {
+                    // Slot is empty - save current state (first click saves)
+                    audioProcessor.savePreset(slot);
+                    currentABCDSlot = slot;
+                    // Visual feedback - green flash
+                    recallBtn.setColour(juce::TextButton::buttonColourId, juce::Colour(80, 180, 80));
+                    juce::Timer::callAfterDelay(200, [&recallBtn]() {
+                        recallBtn.setColour(juce::TextButton::buttonColourId, juce::Colour(45, 45, 52));
+                    });
+                    updateABCDButtonStates();
+                }
+            }
+        };
         addAndMakeVisible(recallBtn);
 
-        saveBtn.setButtonText("Save " + label);
-        saveBtn.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
-        saveBtn.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.65f));
-        saveBtn.onClick = [this, slot] { audioProcessor.savePreset(slot); };
-        addAndMakeVisible(saveBtn);
+        // Save button (hidden - using Cmd+Click instead)
+        saveBtn.setVisible(false);
     };
 
     setupPresetButton(presetButtonA, saveButtonA, "A", 0);
@@ -1397,7 +1823,7 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     addAndMakeVisible(processingModeCombo);
 
     // Setup Version Label (upper right corner)
-    versionLabel.setText("v1.8.5", juce::dontSendNotification);
+    versionLabel.setText("v" + kPluginVersion, juce::dontSendNotification);
     versionLabel.setJustificationType(juce::Justification::centredRight);
     versionLabel.setFont(juce::Font(10.0f, juce::Font::plain));
     versionLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.5f));
@@ -1465,12 +1891,16 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
         p.apvts, "PROCESSING_MODE", processingModeCombo);
 
     // Initialize Master Comp to match Delta Mode state on plugin load
-    bool deltaModeOn = p.apvts.getRawParameterValue("DELTA_MODE")->load() > 0.5f;
+    auto* deltaModeParam = p.apvts.getRawParameterValue("DELTA_MODE");
+    bool deltaModeOn = deltaModeParam ? deltaModeParam->load() > 0.5f : false;
     if (auto* masterCompParam = p.apvts.getParameter("MASTER_COMP"))
         masterCompParam->setValueNotifyingHost(deltaModeOn ? 1.0f : 0.0f);
 
     // Add CalibrationPanel LAST so it appears on top of all other controls
     addChildComponent(calibrationPanel);  // Use addChildComponent to keep panel hidden initially
+
+    // Initialize ABCD button states
+    updateABCDButtonStates();
 }
 
 QuadBlendDriveAudioProcessorEditor::~QuadBlendDriveAudioProcessorEditor()
@@ -1488,23 +1918,55 @@ void QuadBlendDriveAudioProcessorEditor::timerCallback()
     calibrationPanel.updateInputPeakDisplay(peakDB);
     calibrationPanel.updateGainAppliedDisplay(gainDB);
 
-    // Update calibration toggle button based on normalization state
+    // Update Undo/Redo button enabled states
+    bool canUndo = audioProcessor.undoManager.canUndo();
+    bool canRedo = audioProcessor.undoManager.canRedo();
+    undoButton.setColour(juce::TextButton::textColourOffId,
+        juce::Colours::white.withAlpha(canUndo ? 0.85f : 0.3f));
+    redoButton.setColour(juce::TextButton::textColourOffId,
+        juce::Colours::white.withAlpha(canRedo ? 0.85f : 0.3f));
+
+    // Update Learn toggle button based on normalization state
     // Visual feedback shows normalization status even when panel is collapsed
-    // Only lights up when Normalize button is actually toggled ON (not just when analyzed)
+    // Only lights up when Apply button is actually toggled ON (not just when learned)
     bool normalizationEnabled = calibrationPanel.isNormalizationEnabled();
     if (normalizationEnabled)
     {
-        // NORMALIZATION ON: Active/lit state with bright accent color and indicator
-        calibrationToggleButton.setButtonText("● CALIBRATION");  // Indicator dot
+        // APPLIED: Active/lit state with bright accent color and indicator
+        calibrationToggleButton.setButtonText("● LEARN");  // Indicator dot
         calibrationToggleButton.setColour(juce::TextButton::buttonColourId, juce::Colour(255, 140, 60));  // Bright orange (lit)
         calibrationToggleButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
     }
     else
     {
-        // NORMALIZATION OFF: Default/unlit state
-        calibrationToggleButton.setButtonText("CALIBRATION");  // No indicator
+        // NOT APPLIED: Default/unlit state
+        calibrationToggleButton.setButtonText("LEARN");  // No indicator
         calibrationToggleButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));  // Dark grey (unlit)
         calibrationToggleButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
+    }
+
+    // === TRUE PEAK LIMITER AVAILABILITY ===
+    // TPL requires lookahead which is not available in Zero Latency mode
+    auto* processingModeParam = audioProcessor.apvts.getRawParameterValue("PROCESSING_MODE");
+    int processingMode = processingModeParam ? static_cast<int>(processingModeParam->load()) : 1;
+    bool isZeroLatencyMode = (processingMode == 0);
+
+    if (isZeroLatencyMode)
+    {
+        // Disable TPL in Zero Latency mode - it requires lookahead
+        truePeakEnableButton.setEnabled(false);
+        truePeakEnableButton.setAlpha(0.4f);
+        truePeakEnableButton.setTooltip("True Peak Limiter unavailable in Zero Latency mode\n"
+                                        "(requires 2ms lookahead for inter-sample peak detection)");
+    }
+    else
+    {
+        truePeakEnableButton.setEnabled(true);
+        truePeakEnableButton.setAlpha(1.0f);
+        truePeakEnableButton.setTooltip("True Peak Limiter (ITU-R BS.1770-4)\n"
+                                        "• Strict compliance - guarantees ceiling\n"
+                                        "• Maximum transparency, minimal distortion\n"
+                                        "• Recommended for streaming/broadcast");
     }
 
     // === THRESHOLD LINK LOGIC ===
@@ -1513,15 +1975,21 @@ void QuadBlendDriveAudioProcessorEditor::timerCallback()
     if (thresholdLinked)
     {
         // Automatically sync threshold with calibration level
-        float calibLevel = *audioProcessor.apvts.getRawParameterValue("CALIB_LEVEL");
-        float currentThreshold = *audioProcessor.apvts.getRawParameterValue("THRESHOLD");
+        auto* calibParam = audioProcessor.apvts.getRawParameterValue("CALIB_LEVEL");
+        auto* threshParam = audioProcessor.apvts.getRawParameterValue("THRESHOLD");
+        auto* threshParamObj = audioProcessor.apvts.getParameter("THRESHOLD");
 
-        // Only update if there's a meaningful difference (avoid constant updates)
-        if (std::abs(currentThreshold - calibLevel) > 0.05f)
+        if (calibParam != nullptr && threshParam != nullptr && threshParamObj != nullptr)
         {
-            thresholdSlider.setValue(calibLevel, juce::dontSendNotification);
-            audioProcessor.apvts.getParameter("THRESHOLD")->setValueNotifyingHost(
-                audioProcessor.apvts.getParameter("THRESHOLD")->convertTo0to1(calibLevel));
+            float calibLevel = calibParam->load();
+            float currentThreshold = threshParam->load();
+
+            // Only update if there's a meaningful difference (avoid constant updates)
+            if (std::abs(currentThreshold - calibLevel) > 0.05f)
+            {
+                thresholdSlider.setValue(calibLevel, juce::dontSendNotification);
+                threshParamObj->setValueNotifyingHost(threshParamObj->convertTo0to1(calibLevel));
+            }
         }
 
         // Visual feedback: Dim threshold slider when linked (shows it's automated)
@@ -1534,41 +2002,67 @@ void QuadBlendDriveAudioProcessorEditor::timerCallback()
     }
 }
 
+void QuadBlendDriveAudioProcessorEditor::updateABCDButtonStates()
+{
+    // Update button appearance based on whether preset exists and is currently active
+    auto updateButton = [this](juce::TextButton& btn, int slot)
+    {
+        bool hasPreset = audioProcessor.hasPreset(slot);
+        bool isActive = (currentABCDSlot == slot);
+
+        // Text brightness indicates if preset exists
+        btn.setColour(juce::TextButton::textColourOffId,
+            hasPreset ? juce::Colours::white.withAlpha(0.95f) : juce::Colours::white.withAlpha(0.4f));
+
+        // Background color indicates active state
+        if (isActive && hasPreset)
+            btn.setColour(juce::TextButton::buttonColourId, juce::Colour(80, 140, 200));  // Blue = active
+        else
+            btn.setColour(juce::TextButton::buttonColourId, juce::Colour(45, 45, 52));  // Default grey
+    };
+
+    updateButton(presetButtonA, 0);
+    updateButton(presetButtonB, 1);
+    updateButton(presetButtonC, 2);
+    updateButton(presetButtonD, 3);
+}
+
 void QuadBlendDriveAudioProcessorEditor::paint(juce::Graphics& g)
 {
+    const float scale = getWidth() / 1120.0f;
+    const int toolbarHeight = static_cast<int>(28 * scale);
+
     // Modern gradient background
     juce::ColourGradient bgGradient(juce::Colour(16, 16, 20), 0, 0,
                                      juce::Colour(12, 12, 16), 0, static_cast<float>(getHeight()), false);
     g.setGradientFill(bgGradient);
     g.fillAll();
 
-    // Modern title with subtle shadow
-    const float scale = getWidth() / 1120.0f;
+    // ========== TOOLBAR BACKGROUND ==========
+    juce::ColourGradient toolbarGradient(juce::Colour(28, 28, 32), 0, 0,
+                                          juce::Colour(22, 22, 26), 0, static_cast<float>(toolbarHeight), false);
+    g.setGradientFill(toolbarGradient);
+    g.fillRect(0, 0, getWidth(), toolbarHeight);
+
+    // Toolbar bottom border
+    g.setColour(juce::Colour(50, 50, 55));
+    g.drawLine(0, static_cast<float>(toolbarHeight - 1),
+               static_cast<float>(getWidth()), static_cast<float>(toolbarHeight - 1), 1.0f);
+
+    // ========== TITLE (below toolbar) ==========
+    const int titleY = toolbarHeight;
 
     // Shadow/glow effect
     g.setColour(juce::Colour(255, 120, 50).withAlpha(0.15f));
-    g.setFont(juce::Font(48.0f * scale, juce::Font::bold));  // 24 * 2 = 48
-    g.drawText("S.T.E.V.E.", 0, static_cast<int>(11 * scale), getWidth(),
-               static_cast<int>(65 * scale), juce::Justification::centred);
+    g.setFont(juce::Font(42.0f * scale, juce::Font::bold));
+    g.drawText("Bongo Juice", 0, titleY + static_cast<int>(6 * scale), getWidth(),
+               static_cast<int>(50 * scale), juce::Justification::centred);
 
     // Main title
     g.setColour(juce::Colours::white.withAlpha(0.95f));
-    g.setFont(juce::Font(48.0f * scale, juce::Font::plain));  // 24 * 2 = 48
-    g.drawText("S.T.E.V.E.", 0, static_cast<int>(10 * scale), getWidth(),
-               static_cast<int>(65 * scale), juce::Justification::centred);
-
-    // Subtitle
-    g.setColour(juce::Colours::white.withAlpha(0.6f));
-    g.setFont(juce::Font(18.0f * scale, juce::Font::plain));  // 9 * 2 = 18
-    g.drawText("Signal Transfer Enhanced Volume Engine", 0, static_cast<int>(55 * scale), getWidth(),
-               static_cast<int>(32 * scale), juce::Justification::centred);
-
-    // Window size display (upper right corner, above version)
-    g.setColour(juce::Colour(255, 120, 50).withAlpha(0.8f));
-    g.setFont(juce::Font(12.0f * scale, juce::Font::bold));
-    juce::String sizeText = juce::String(getWidth()) + " × " + juce::String(getHeight());
-    g.drawText(sizeText, getWidth() - static_cast<int>(120 * scale), static_cast<int>(5 * scale),
-               static_cast<int>(110 * scale), static_cast<int>(16 * scale), juce::Justification::centredRight);
+    g.setFont(juce::Font(42.0f * scale, juce::Font::plain));
+    g.drawText("Bongo Juice", 0, titleY + static_cast<int>(5 * scale), getWidth(),
+               static_cast<int>(50 * scale), juce::Justification::centred);
 }
 
 void QuadBlendDriveAudioProcessorEditor::resized()
@@ -1576,30 +2070,75 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     auto bounds = getLocalBounds();
     const float scale = getWidth() / 1120.0f;  // Scale factor based on default width
 
-    // Proportional title area (increased for 2x larger title/subtitle)
-    auto titleArea = bounds.removeFromTop(static_cast<int>(95 * scale));
+    // ========== TOOLBAR AREA (TOP) ==========
+    const int toolbarHeight = static_cast<int>(28 * scale);
+    auto toolbarArea = bounds.removeFromTop(toolbarHeight);
+    const int toolbarPadding = static_cast<int>(12 * scale);
+    const int toolbarButtonHeight = static_cast<int>(20 * scale);
+    const int toolbarY = (toolbarHeight - toolbarButtonHeight) / 2;
 
-    // Version label in upper right corner (below window size)
-    versionLabel.setBounds(titleArea.getWidth() - static_cast<int>(80 * scale),
-                          static_cast<int>(22 * scale),
-                          static_cast<int>(70 * scale),
-                          static_cast<int>(16 * scale));
+    // Toolbar button widths
+    const int calibBtnWidth = static_cast<int>(95 * scale);
+    const int presetMenuWidth = static_cast<int>(115 * scale);
+    const int quickPresetWidth = static_cast<int>(26 * scale);
+    const int engineLabelWidth = static_cast<int>(55 * scale);
+    const int engineComboWidth = static_cast<int>(115 * scale);
+    const int undoRedoWidth = static_cast<int>(42 * scale);
+    const int helpBtnWidth = static_cast<int>(24 * scale);
+    const int versionWidth = static_cast<int>(50 * scale);
 
-    // Calibration Toggle Button in upper left corner
-    const int calibButtonWidth = static_cast<int>(100 * scale);
-    const int calibButtonHeight = static_cast<int>(25 * scale);
-    calibrationToggleButton.setBounds(static_cast<int>(10 * scale),
-                                     static_cast<int>(10 * scale),
-                                     calibButtonWidth,
-                                     calibButtonHeight);
+    int toolbarX = toolbarPadding;
 
-    // Calibration Panel - Below toggle button when expanded
+    // CALIBRATION button
+    calibrationToggleButton.setBounds(toolbarX, toolbarY, calibBtnWidth, toolbarButtonHeight);
+    toolbarX += calibBtnWidth + static_cast<int>(8 * scale);
+
+    // Default Setting dropdown
+    presetMenuButton.setBounds(toolbarX, toolbarY, presetMenuWidth, toolbarButtonHeight);
+    toolbarX += presetMenuWidth + static_cast<int>(12 * scale);
+
+    // Quick Presets A, B, C, D
+    const int presetGap = static_cast<int>(4 * scale);
+    presetButtonA.setBounds(toolbarX, toolbarY, quickPresetWidth, toolbarButtonHeight);
+    toolbarX += quickPresetWidth + presetGap;
+    presetButtonB.setBounds(toolbarX, toolbarY, quickPresetWidth, toolbarButtonHeight);
+    toolbarX += quickPresetWidth + presetGap;
+    presetButtonC.setBounds(toolbarX, toolbarY, quickPresetWidth, toolbarButtonHeight);
+    toolbarX += quickPresetWidth + presetGap;
+    presetButtonD.setBounds(toolbarX, toolbarY, quickPresetWidth, toolbarButtonHeight);
+    toolbarX += quickPresetWidth + static_cast<int>(20 * scale);  // Spacer before ENGINE
+
+    // ENGINE label and combo
+    processingModeLabel.setBounds(toolbarX, toolbarY, engineLabelWidth, toolbarButtonHeight);
+    toolbarX += engineLabelWidth + static_cast<int>(4 * scale);
+    processingModeCombo.setBounds(toolbarX, toolbarY, engineComboWidth, toolbarButtonHeight);
+
+    // Right side of toolbar: Undo, Redo, Help, Version
+    int rightX = getWidth() - toolbarPadding - versionWidth;
+    versionLabel.setBounds(rightX, toolbarY, versionWidth, toolbarButtonHeight);
+    rightX -= helpBtnWidth + static_cast<int>(12 * scale);
+    helpButton.setBounds(rightX, toolbarY, helpBtnWidth, toolbarButtonHeight);
+    rightX -= undoRedoWidth + static_cast<int>(20 * scale);
+    redoButton.setBounds(rightX, toolbarY, undoRedoWidth, toolbarButtonHeight);
+    rightX -= undoRedoWidth + static_cast<int>(8 * scale);
+    undoButton.setBounds(rightX, toolbarY, undoRedoWidth, toolbarButtonHeight);
+
+    // Hide save buttons (not needed in toolbar)
+    saveButtonA.setBounds(0, 0, 0, 0);
+    saveButtonB.setBounds(0, 0, 0, 0);
+    saveButtonC.setBounds(0, 0, 0, 0);
+    saveButtonD.setBounds(0, 0, 0, 0);
+
+    // ========== TITLE AREA ==========
+    auto titleArea = bounds.removeFromTop(static_cast<int>(70 * scale));
+
+    // Calibration Panel - Below toolbar when expanded
     if (calibrationPanel.isVisible())
     {
         const int panelWidth = static_cast<int>(250 * scale);
         const int panelHeight = 200;
-        calibrationPanel.setBounds(static_cast<int>(10 * scale),
-                                  static_cast<int>(10 * scale) + calibButtonHeight + static_cast<int>(5 * scale),
+        calibrationPanel.setBounds(toolbarPadding,
+                                  toolbarHeight + static_cast<int>(5 * scale),
                                   panelWidth,
                                   panelHeight);
     }
@@ -1608,10 +2147,29 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     const int knobSize = static_cast<int>(70 * scale);
     const int spacing = static_cast<int>(10 * scale);
 
-    // Reserve bottom for waveform display FIRST - FULL WIDTH
-    // Combined height: previous meterArea (120) + spacing (10) + oscilloscope (250) = 380 * scale
-    auto oscilloscopeArea = bounds.removeFromBottom(static_cast<int>(380 * scale));
-    bounds.removeFromBottom(spacing);
+    // === PANEL EXPANSION LOGIC ===
+    // Base content height is 600px minus toolbar and title
+    // Scope and Advanced panels expand BELOW this baseline
+    const int baseHeight = static_cast<int>(600 * scale);
+    const int titleHeight = static_cast<int>(70 * scale);
+    const int mainContentHeight = baseHeight - toolbarHeight - titleHeight;
+    const int advancedHeight = static_cast<int>(180 * scale);
+
+    // Main content area is constrained to the top 600px (minus toolbar/title)
+    juce::Rectangle<int> mainContentBounds = bounds;
+    mainContentBounds.setHeight(mainContentHeight);
+
+    // Scope and Advanced panels go below the base 600px line
+    juce::Rectangle<int> scopeArea;
+
+    if (steveScope.isVisible())
+    {
+        // Scope area fills from baseHeight to bottom of window
+        scopeArea = juce::Rectangle<int>(0, baseHeight, getWidth(), getHeight() - baseHeight);
+    }
+
+    // Use mainContentBounds instead of bounds for the 3-column layout
+    bounds = mainContentBounds;
 
     // Now reserve right edge for input/output meters (from remaining height)
     const int meterWidth = static_cast<int>(49 * scale);  // 30% slimmer than before (70 * 0.7 = 49)
@@ -1627,144 +2185,103 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     // ========== LEFT SECTION (INPUT CONTROLS) ==========
     auto leftSection = bounds.removeFromLeft(sideColumnWidth).reduced(padding, 0);
 
-    // Input Gain
-    auto inputRow = leftSection.removeFromTop(knobSize);
-    inputGainLabel.setBounds(inputRow.removeFromLeft(static_cast<int>(60 * scale)).removeFromTop(knobSize));
-    inputGainSlider.setBounds(inputRow.removeFromLeft(knobSize));
-    leftSection.removeFromTop(spacing);
+    // === EVENLY SPACED LAYOUT ===
+    const int mainKnobSize = knobSize;                         // Input/Thresh knobs (70)
+    const int trimKnobSize = static_cast<int>(65 * scale);    // Processor trim knobs
+    const int msButtonSize = static_cast<int>(36 * scale);    // M/S buttons - BIGGER like before
+    const int calButtonWidth = static_cast<int>(36 * scale);
+    const int calButtonHeight = static_cast<int>(20 * scale);
+    const int labelWidth = static_cast<int>(50 * scale);
 
-    // Threshold (Calib controls moved to CalibrationPanel)
-    auto threshRow = leftSection.removeFromTop(knobSize);
-    thresholdLabel.setBounds(threshRow.removeFromLeft(static_cast<int>(60 * scale)).removeFromTop(knobSize));
-    thresholdSlider.setBounds(threshRow.removeFromLeft(knobSize));
-    threshRow.removeFromLeft(spacing / 2);  // Small gap between knob and button
-    thresholdLinkButton.setBounds(threshRow.removeFromLeft(static_cast<int>(42 * scale)).withHeight(static_cast<int>(22 * scale)));
-    leftSection.removeFromTop(spacing * 2);
+    // Calculate even row spacing - 6 main rows + reset button row
+    const int totalRows = 7;  // Input, Thresh, Slow, Soft, Hard, Fast, Reset
+    const int availableHeight = leftSection.getHeight();
+    const int rowHeight = availableHeight / totalRows;
 
-    // 4 Processor Trims - [Label][Knob][Mute]
-    // Order (top to bottom): SL, SC, HC, FL (Column-based: Left column, then Right column)
-    const int trimRowHeight = static_cast<int>(70 * scale);
-    const int trimKnobSize = static_cast<int>(65 * scale);
-    const int buttonSize = static_cast<int>(28 * scale);
-    const int trimLabelWidth = static_cast<int>(48 * scale);
-    const int trimTopMargin = static_cast<int>(20 * scale);
+    // Center the knobs in the column
+    const int leftColumnCenter = leftSection.getX() + leftSection.getWidth() / 2;
+    const int knobCenterX = leftColumnCenter;
+    const int knobX = knobCenterX - mainKnobSize / 2;
+    const int trimKnobX = knobCenterX - trimKnobSize / 2;
 
-    // SL Trim - [Label][Knob][Mute][Solo] (Top-Left quadrant)
-    auto slRow = leftSection.removeFromTop(trimRowHeight);
-    slTrimLabel.setBounds(slRow.removeFromLeft(trimLabelWidth).withTrimmedTop(trimTopMargin));
-    slTrimSlider.setBounds(slRow.removeFromLeft(trimKnobSize));
-    slRow.removeFromLeft(spacing);
-    slMuteButton.setBounds(slRow.removeFromLeft(buttonSize).withTrimmedTop(trimTopMargin));
-    slRow.removeFromLeft(spacing / 2);  // Smaller spacing between M and S buttons
-    slSoloButton.setBounds(slRow.removeFromLeft(buttonSize).withTrimmedTop(trimTopMargin));
-    leftSection.removeFromTop(spacing);
+    // Labels to the left of knobs
+    const int labelX = leftSection.getX();
 
-    // SC Trim - [Label][Knob][Mute][Solo] (Bottom-Left quadrant)
-    auto scRow = leftSection.removeFromTop(trimRowHeight);
-    scTrimLabel.setBounds(scRow.removeFromLeft(trimLabelWidth).withTrimmedTop(trimTopMargin));
-    scTrimSlider.setBounds(scRow.removeFromLeft(trimKnobSize));
-    scRow.removeFromLeft(spacing);
-    scMuteButton.setBounds(scRow.removeFromLeft(buttonSize).withTrimmedTop(trimTopMargin));
-    scRow.removeFromLeft(spacing / 2);  // Smaller spacing between M and S buttons
-    scSoloButton.setBounds(scRow.removeFromLeft(buttonSize).withTrimmedTop(trimTopMargin));
-    leftSection.removeFromTop(spacing);
+    // M/S buttons to the right of knobs
+    const int msButtonX = knobCenterX + trimKnobSize / 2 + static_cast<int>(15 * scale);
+    const int msButtonGap = static_cast<int>(6 * scale);
 
-    // HC Trim - [Label][Knob][Mute][Solo] (Top-Right quadrant)
-    auto hcRow = leftSection.removeFromTop(trimRowHeight);
-    hcTrimLabel.setBounds(hcRow.removeFromLeft(trimLabelWidth).withTrimmedTop(trimTopMargin));
-    hcTrimSlider.setBounds(hcRow.removeFromLeft(trimKnobSize));
-    hcRow.removeFromLeft(spacing);
-    hcMuteButton.setBounds(hcRow.removeFromLeft(buttonSize).withTrimmedTop(trimTopMargin));
-    hcRow.removeFromLeft(spacing / 2);  // Smaller spacing between M and S buttons
-    hcSoloButton.setBounds(hcRow.removeFromLeft(buttonSize).withTrimmedTop(trimTopMargin));
-    leftSection.removeFromTop(spacing);
+    // CAL button position (to the right of threshold knob)
+    const int calButtonX = knobCenterX + mainKnobSize / 2 + static_cast<int>(10 * scale);
 
-    // FL Trim - [Label][Knob][Mute][Solo] (Bottom-Right quadrant)
-    auto flRow = leftSection.removeFromTop(trimRowHeight);
-    flTrimLabel.setBounds(flRow.removeFromLeft(trimLabelWidth).withTrimmedTop(trimTopMargin));
-    flTrimSlider.setBounds(flRow.removeFromLeft(trimKnobSize));
-    flRow.removeFromLeft(spacing);
-    flMuteButton.setBounds(flRow.removeFromLeft(buttonSize).withTrimmedTop(trimTopMargin));
-    flRow.removeFromLeft(spacing / 2);  // Smaller spacing between M and S buttons
-    flSoloButton.setBounds(flRow.removeFromLeft(buttonSize).withTrimmedTop(trimTopMargin));
-    leftSection.removeFromTop(spacing);
+    // Vertical centering helper
+    auto centerInRow = [](int rowY, int rowH, int itemH) { return rowY + (rowH - itemH) / 2; };
 
-    // Reset Trims button (50% smaller)
-    resetTrimsButton.setBounds(leftSection.removeFromTop(static_cast<int>(28 * scale))
-        .withSizeKeepingCentre(static_cast<int>(60 * scale), static_cast<int>(22 * scale)));
+    // Input Gain row
+    auto inputRow = leftSection.removeFromTop(rowHeight);
+    inputGainLabel.setBounds(labelX, centerInRow(inputRow.getY(), rowHeight, mainKnobSize), labelWidth, mainKnobSize);
+    inputGainSlider.setBounds(knobX, centerInRow(inputRow.getY(), rowHeight, mainKnobSize), mainKnobSize, mainKnobSize);
+
+    // Threshold row - CAL button to the RIGHT of knob
+    auto threshRow = leftSection.removeFromTop(rowHeight);
+    thresholdLabel.setBounds(labelX, centerInRow(threshRow.getY(), rowHeight, mainKnobSize), labelWidth, mainKnobSize);
+    thresholdSlider.setBounds(knobX, centerInRow(threshRow.getY(), rowHeight, mainKnobSize), mainKnobSize, mainKnobSize);
+    thresholdLinkButton.setBounds(calButtonX, centerInRow(threshRow.getY(), rowHeight, calButtonHeight), calButtonWidth, calButtonHeight);
+
+    // 4 Processor Trims - [Label][Knob][M][S]
+    // Slow Trim
+    auto slRow = leftSection.removeFromTop(rowHeight);
+    slTrimLabel.setBounds(labelX, centerInRow(slRow.getY(), rowHeight, trimKnobSize), labelWidth, trimKnobSize);
+    slTrimSlider.setBounds(trimKnobX, centerInRow(slRow.getY(), rowHeight, trimKnobSize), trimKnobSize, trimKnobSize);
+    slMuteButton.setBounds(msButtonX, centerInRow(slRow.getY(), rowHeight, msButtonSize), msButtonSize, msButtonSize);
+    slSoloButton.setBounds(msButtonX + msButtonSize + msButtonGap, centerInRow(slRow.getY(), rowHeight, msButtonSize), msButtonSize, msButtonSize);
+
+    // Soft Trim
+    auto scRow = leftSection.removeFromTop(rowHeight);
+    scTrimLabel.setBounds(labelX, centerInRow(scRow.getY(), rowHeight, trimKnobSize), labelWidth, trimKnobSize);
+    scTrimSlider.setBounds(trimKnobX, centerInRow(scRow.getY(), rowHeight, trimKnobSize), trimKnobSize, trimKnobSize);
+    scMuteButton.setBounds(msButtonX, centerInRow(scRow.getY(), rowHeight, msButtonSize), msButtonSize, msButtonSize);
+    scSoloButton.setBounds(msButtonX + msButtonSize + msButtonGap, centerInRow(scRow.getY(), rowHeight, msButtonSize), msButtonSize, msButtonSize);
+
+    // Hard Trim
+    auto hcRow = leftSection.removeFromTop(rowHeight);
+    hcTrimLabel.setBounds(labelX, centerInRow(hcRow.getY(), rowHeight, trimKnobSize), labelWidth, trimKnobSize);
+    hcTrimSlider.setBounds(trimKnobX, centerInRow(hcRow.getY(), rowHeight, trimKnobSize), trimKnobSize, trimKnobSize);
+    hcMuteButton.setBounds(msButtonX, centerInRow(hcRow.getY(), rowHeight, msButtonSize), msButtonSize, msButtonSize);
+    hcSoloButton.setBounds(msButtonX + msButtonSize + msButtonGap, centerInRow(hcRow.getY(), rowHeight, msButtonSize), msButtonSize, msButtonSize);
+
+    // Fast Trim
+    auto flRow = leftSection.removeFromTop(rowHeight);
+    flTrimLabel.setBounds(labelX, centerInRow(flRow.getY(), rowHeight, trimKnobSize), labelWidth, trimKnobSize);
+    flTrimSlider.setBounds(trimKnobX, centerInRow(flRow.getY(), rowHeight, trimKnobSize), trimKnobSize, trimKnobSize);
+    flMuteButton.setBounds(msButtonX, centerInRow(flRow.getY(), rowHeight, msButtonSize), msButtonSize, msButtonSize);
+    flSoloButton.setBounds(msButtonX + msButtonSize + msButtonGap, centerInRow(flRow.getY(), rowHeight, msButtonSize), msButtonSize, msButtonSize);
+
+    // Reset Trims button - aligned with ADVANCED and SCOPE buttons (positioned after advancedButtonY is calculated)
+    // Just consume the row for now, button placement happens later
+    auto resetRow = leftSection.removeFromTop(rowHeight);
+    (void)resetRow;  // Unused - button positioned below with advancedButtonY
 
     // ========== CENTER SECTION (XY PAD) - CENTERED AND SQUARE ==========
     auto centerSection = bounds.removeFromLeft(centerColumnWidth).reduced(padding, 0);
 
-    // Processing Mode Selector above XY Pad (centered over XY grid)
-    auto processingModeRow = centerSection.removeFromTop(static_cast<int>(32 * scale));
-    int processingModeWidth = static_cast<int>(280 * scale);
-    int processingModeLabelWidth = static_cast<int>(60 * scale);
-    int processingModeComboWidth = static_cast<int>(160 * scale);
-    int processingModeXOffset = (processingModeRow.getWidth() - processingModeWidth) / 2;
-
-    processingModeLabel.setBounds(processingModeRow.getX() + processingModeXOffset,
-                                  processingModeRow.getY(),
-                                  processingModeLabelWidth,
-                                  static_cast<int>(28 * scale));
-    processingModeCombo.setBounds(processingModeRow.getX() + processingModeXOffset + processingModeLabelWidth + static_cast<int>(8 * scale),
-                                  processingModeRow.getY(),
-                                  processingModeComboWidth,
-                                  static_cast<int>(28 * scale));
-
-    centerSection.removeFromTop(static_cast<int>(12 * scale));  // Gap below Processing Mode selector
-
-    // Preset buttons above XY Pad in a single row (proportionally scaled and centered)
-    const int presetButtonWidth = static_cast<int>(42 * scale);
-    const int saveButtonWidth = static_cast<int>(56 * scale);
-    const int presetButtonHeight = static_cast<int>(25 * scale);
-    const int presetSpacing = static_cast<int>(4 * scale);
-
-    // Calculate total width of all preset buttons
-    int totalPresetWidth = (presetButtonWidth + presetSpacing + saveButtonWidth + presetSpacing * 2) * 4 - presetSpacing * 2;
-
-    auto presetRow = centerSection.removeFromTop(presetButtonHeight);
-    int presetXStart = presetRow.getX() + (presetRow.getWidth() - totalPresetWidth) / 2;
-
-    // Single row: A, Save A, B, Save B, C, Save C, D, Save D (centered)
-    int xPos = presetXStart;
-
-    presetButtonA.setBounds(xPos, presetRow.getY(), presetButtonWidth, presetButtonHeight);
-    xPos += presetButtonWidth + presetSpacing;
-    saveButtonA.setBounds(xPos, presetRow.getY(), saveButtonWidth, presetButtonHeight);
-    xPos += saveButtonWidth + presetSpacing * 2;
-
-    presetButtonB.setBounds(xPos, presetRow.getY(), presetButtonWidth, presetButtonHeight);
-    xPos += presetButtonWidth + presetSpacing;
-    saveButtonB.setBounds(xPos, presetRow.getY(), saveButtonWidth, presetButtonHeight);
-    xPos += saveButtonWidth + presetSpacing * 2;
-
-    presetButtonC.setBounds(xPos, presetRow.getY(), presetButtonWidth, presetButtonHeight);
-    xPos += presetButtonWidth + presetSpacing;
-    saveButtonC.setBounds(xPos, presetRow.getY(), saveButtonWidth, presetButtonHeight);
-    xPos += saveButtonWidth + presetSpacing * 2;
-
-    presetButtonD.setBounds(xPos, presetRow.getY(), presetButtonWidth, presetButtonHeight);
-    xPos += presetButtonWidth + presetSpacing;
-    saveButtonD.setBounds(xPos, presetRow.getY(), saveButtonWidth, presetButtonHeight);
-
-    centerSection.removeFromTop(static_cast<int>(15 * scale));  // Gap below preset buttons
+    // (Engine mode and preset buttons are now in toolbar - no duplicate positioning here)
 
     // Make XY Pad SQUARE - use the smaller dimension
-    int availableHeight = centerSection.getHeight();
-    int availableWidth = centerSection.getWidth();
-    int xySize = juce::jmin(availableWidth, availableHeight);
+    int xyAvailableHeight = centerSection.getHeight();
+    int xyAvailableWidth = centerSection.getWidth();
+    int xySize = juce::jmin(xyAvailableWidth, xyAvailableHeight);
 
     // Center the square XY pad both horizontally and vertically
-    int xOffset = (availableWidth - xySize) / 2;
-    int yOffset = (availableHeight - xySize) / 2;
+    int xOffset = (xyAvailableWidth - xySize) / 2;
+    int yOffset = (xyAvailableHeight - xySize) / 2;
     xyPad.setBounds(centerSection.getX() + xOffset, centerSection.getY() + yOffset, xySize, xySize);
 
     // Advanced Toggle Button - Centered below XY Pad
     const int advancedButtonHeight = static_cast<int>(30 * scale);
     const int advancedButtonWidth = static_cast<int>(120 * scale);
     int advancedButtonY = centerSection.getY() + yOffset + xySize + static_cast<int>(10 * scale);
-    int advancedButtonX = centerSection.getX() + (availableWidth - advancedButtonWidth) / 2;
+    int advancedButtonX = centerSection.getX() + (xyAvailableWidth - advancedButtonWidth) / 2;
     advancedToggleButton.setBounds(advancedButtonX, advancedButtonY, advancedButtonWidth, advancedButtonHeight);
 
     // Advanced Panel - Overlays waveform meter when visible
@@ -1774,7 +2291,7 @@ void QuadBlendDriveAudioProcessorEditor::resized()
         const int advancedPanelWidth = static_cast<int>(600 * scale);  // Wider for two-column layout
         const int advancedPanelHeight = static_cast<int>(312 * scale);  // 50% larger than previous (208 * 1.5)
         int advancedPanelY = advancedButtonY + advancedButtonHeight + static_cast<int>(8 * scale);
-        int advancedPanelX = centerSection.getX() + (availableWidth - advancedPanelWidth) / 2;
+        int advancedPanelX = centerSection.getX() + (xyAvailableWidth - advancedPanelWidth) / 2;
         advancedPanel.setBounds(advancedPanelX, advancedPanelY, advancedPanelWidth, advancedPanelHeight);
     }
     else
@@ -1783,67 +2300,71 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     }
 
     // ========== RIGHT SECTION (OUTPUT CONTROLS) ==========
+    // Organized into 3 groups:
+    // Group 1: Output, LINK I/O, BYPASS, DELTA MODE, Mix
+    // Group 2: Ceiling, OVERSHOOT, TRUE PEAK
+    // Group 3: SCOPE (aligned with ADVANCED button)
     auto rightSection = bounds.reduced(padding, 0);
 
+    const int rightKnobSize = knobSize;
+    const int rightButtonWidth = static_cast<int>(100 * scale);
+    const int rightButtonHeight = static_cast<int>(28 * scale);
+    const int rightLabelWidth = static_cast<int>(55 * scale);
+    const int rightRowSpacing = static_cast<int>(8 * scale);
+
+    // Center the knobs/buttons in the column
+    const int rightColumnCenter = rightSection.getX() + rightSection.getWidth() / 2;
+    const int rightKnobX = rightColumnCenter - rightKnobSize / 2;
+    const int rightButtonX = rightColumnCenter - rightButtonWidth / 2;
+    const int rightLabelX = rightSection.getX();
+
+    // === GROUP 1: Output, LINK I/O, BYPASS, DELTA MODE, Mix ===
+    int currentY = rightSection.getY();
+
     // Output Gain
-    auto outputRow = rightSection.removeFromTop(knobSize);
-    outputGainLabel.setBounds(outputRow.removeFromLeft(static_cast<int>(60 * scale)).removeFromTop(knobSize));
-    outputGainSlider.setBounds(outputRow.removeFromLeft(knobSize));
-    rightSection.removeFromTop(spacing);
+    outputGainLabel.setBounds(rightLabelX, currentY, rightLabelWidth, rightKnobSize);
+    outputGainSlider.setBounds(rightKnobX, currentY, rightKnobSize, rightKnobSize);
+    currentY += rightKnobSize + rightRowSpacing;
 
-    // Consistent button sizing for Link I/O, Bypass, Gain Comp, Delta Mode
-    const int buttonWidth = static_cast<int>(95 * scale);
-    const int buttonHeight = static_cast<int>(28 * scale);
+    // LINK I/O button
+    gainLinkButton.setBounds(rightButtonX, currentY, rightButtonWidth, rightButtonHeight);
+    currentY += rightButtonHeight + rightRowSpacing;
 
-    // Link I/O button
-    gainLinkButton.setBounds(rightSection.removeFromTop(buttonHeight)
-        .withSizeKeepingCentre(buttonWidth, buttonHeight));
-    rightSection.removeFromTop(spacing);
+    // BYPASS button
+    bypassButton.setBounds(rightButtonX, currentY, rightButtonWidth, rightButtonHeight);
+    currentY += rightButtonHeight + rightRowSpacing;
 
-    // Bypass button
-    bypassButton.setBounds(rightSection.removeFromTop(buttonHeight)
-        .withSizeKeepingCentre(buttonWidth, buttonHeight));
-    rightSection.removeFromTop(spacing);
+    // DELTA MODE button
+    deltaModeButton.setBounds(rightButtonX, currentY, rightButtonWidth, rightButtonHeight);
+    currentY += rightButtonHeight + rightRowSpacing;
 
-    // Master Gain Compensation button (hidden - always enabled)
-    // masterCompButton.setBounds(...) - removed, button is hidden
+    // Mix knob
+    mixLabel.setBounds(rightLabelX, currentY, rightLabelWidth, rightKnobSize);
+    mixSlider.setBounds(rightKnobX, currentY, rightKnobSize, rightKnobSize);
+    currentY += rightKnobSize + static_cast<int>(20 * scale);  // Extra gap before Group 2
 
-    // Delta Mode button
-    deltaModeButton.setBounds(rightSection.removeFromTop(buttonHeight)
-        .withSizeKeepingCentre(buttonWidth, buttonHeight));
-    rightSection.removeFromTop(spacing * 2);
+    // === GROUP 2: Ceiling, OVERSHOOT, TRUE PEAK ===
+    // Ceiling knob
+    outputCeilingLabel.setBounds(rightLabelX, currentY, rightLabelWidth, rightKnobSize);
+    outputCeilingSlider.setBounds(rightKnobX, currentY, rightKnobSize, rightKnobSize);
+    currentY += rightKnobSize + rightRowSpacing;
 
-    // O/S Delta button removed - functionality integrated into main delta mode
+    // OVERSHOOT button
+    overshootEnableButton.setBounds(rightButtonX, currentY, rightButtonWidth, rightButtonHeight);
+    currentY += rightButtonHeight + rightRowSpacing;
 
-    // TP Delta disabled
-    // truePeakDeltaModeButton.setBounds(rightSection.removeFromTop(buttonHeight)
-    //     .withSizeKeepingCentre(buttonWidth, buttonHeight));
-    // rightSection.removeFromTop(spacing);
+    // TRUE PEAK button
+    truePeakEnableButton.setBounds(rightButtonX, currentY, rightButtonWidth, rightButtonHeight);
 
-    // Mix
-    auto mixRow = rightSection.removeFromTop(knobSize);
-    mixLabel.setBounds(mixRow.removeFromLeft(static_cast<int>(60 * scale)).removeFromTop(knobSize));
-    mixSlider.setBounds(mixRow.removeFromLeft(knobSize));
-    rightSection.removeFromTop(spacing * 2);
+    // === GROUP 3: SCOPE button (aligned with ADVANCED button) ===
+    // Position SCOPE at same Y as ADVANCED button
+    scopeToggleButton.setBounds(rightButtonX, advancedButtonY, rightButtonWidth, advancedButtonHeight);
 
-    // === OUTPUT LIMITER CONTROLS (Simplified) ===
-    rightSection.removeFromTop(spacing);
-
-    // Output Ceiling (shared by both limiters)
-    auto ceilingRow = rightSection.removeFromTop(knobSize);
-    outputCeilingLabel.setBounds(ceilingRow.removeFromLeft(static_cast<int>(60 * scale)).removeFromTop(knobSize));
-    outputCeilingSlider.setBounds(ceilingRow.removeFromLeft(knobSize));
-    rightSection.removeFromTop(spacing);
-
-    // Overshoot Enable Button
-    auto overshootRow = rightSection.removeFromTop(static_cast<int>(28 * scale));
-    overshootEnableButton.setBounds(overshootRow.removeFromLeft(static_cast<int>(95 * scale)));
-    rightSection.removeFromTop(spacing);
-
-    // True Peak Enable Button
-    auto truePeakRow = rightSection.removeFromTop(static_cast<int>(28 * scale));
-    truePeakEnableButton.setBounds(truePeakRow.removeFromLeft(static_cast<int>(95 * scale)));
-    rightSection.removeFromTop(spacing);
+    // === RESET TRIMS button (aligned with ADVANCED and SCOPE) ===
+    // Position in left column at same Y as ADVANCED/SCOPE
+    const int resetTrimsWidth = static_cast<int>(100 * scale);
+    const int resetTrimsX = padding + labelWidth + static_cast<int>(10 * scale);  // Aligned with trim knobs
+    resetTrimsButton.setBounds(resetTrimsX, advancedButtonY, resetTrimsWidth, advancedButtonHeight);
 
     // ========== RIGHT EDGE METERS (INPUT/OUTPUT) ==========
     // Position input and output meters side-by-side from right edge: [IN] [OUT]
@@ -1852,8 +2373,17 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     meterArea.removeFromRight(meterGap);  // Gap between meters
     inputMeter.setBounds(meterArea.removeFromRight(meterWidth));
 
-    // ========== BOTTOM (WAVEFORM) - FULL WIDTH ==========
-    oscilloscope.setBounds(oscilloscopeArea.reduced(padding, 0));
+    // ========== SCOPE AREA (when visible) ==========
+    if (steveScope.isVisible())
+    {
+        // STEVEScope fills the expanded area below 600px
+        steveScope.setBounds(scopeArea.reduced(padding, padding));
+    }
+    else
+    {
+        // When hidden, make sure it's not visible
+        steveScope.setBounds(0, 0, 0, 0);
+    }
 
     // Transfer Curve toggle button and meter (hidden, not used in current layout)
     transferCurveToggleButton.setBounds(0, 0, 0, 0);

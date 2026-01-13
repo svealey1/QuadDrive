@@ -7,6 +7,7 @@
 #include "TransferCurveMeter.h"
 #include "StereoMeter.h"
 #include "STEVELookAndFeel.h"
+#include "STEVEScope.h"
 
 // Master Meter Component
 class MasterMeter : public juce::Component, private juce::Timer
@@ -61,6 +62,7 @@ public:
     void mouseDown(const juce::MouseEvent& event) override;
     void mouseDrag(const juce::MouseEvent& event) override;
     void mouseUp(const juce::MouseEvent& event) override;
+    void mouseDoubleClick(const juce::MouseEvent& event) override;
     void resized() override;
 
 private:
@@ -201,6 +203,7 @@ public:
 
 private:
     void timerCallback() override;
+    void updateABCDButtonStates();  // Update ABCD button visual states
 
     QuadBlendDriveAudioProcessor& audioProcessor;
 
@@ -216,7 +219,7 @@ private:
     juce::TextButton advancedToggleButton;
 
     // Visualizations
-    Oscilloscope oscilloscope;
+    STEVEScope steveScope;  // Comprehensive waveform scope with settings menu
     TransferCurveMeter transferCurveMeter;  // Transfer curve with level meter
     juce::TextButton transferCurveToggleButton;  // Toggle button for transfer curve
     StereoMeter inputMeter;   // Stereo input meter
@@ -266,6 +269,12 @@ private:
     // Version Label (upper right corner)
     juce::Label versionLabel;
 
+    // === TOOLBAR COMPONENTS ===
+    juce::TextButton presetMenuButton;      // "Default Setting" dropdown
+    juce::TextButton undoButton, redoButton;
+    juce::TextButton helpButton;
+    juce::TextButton scopeToggleButton;     // Toggle scope visibility
+
     // Toggle Buttons for Muting processors
     juce::ToggleButton hcMuteButton, scMuteButton, slMuteButton, flMuteButton;
 
@@ -314,6 +323,11 @@ private:
 
     // Custom look and feel
     STEVELookAndFeel lookAndFeel;
+
+    // Preset management
+    std::unique_ptr<juce::FileChooser> fileChooser;
+    juce::File currentPresetPath;
+    int currentABCDSlot{-1};  // -1 = none, 0-3 = A/B/C/D
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(QuadBlendDriveAudioProcessorEditor)
 };

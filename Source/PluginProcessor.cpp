@@ -7,7 +7,7 @@ QuadBlendDriveAudioProcessor::QuadBlendDriveAudioProcessor()
     : AudioProcessor(BusesProperties()
                          .withInput("Input", juce::AudioChannelSet::stereo(), true)
                          .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
-      apvts(*this, nullptr, "Parameters", createParameterLayout())
+      apvts(*this, &undoManager, "Parameters", createParameterLayout())
 {
 }
 
@@ -30,7 +30,7 @@ QuadBlendDriveAudioProcessor::createParameterLayout()
 
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         "THRESHOLD", "Threshold",
-        juce::NormalisableRange<float>(-12.0f, 0.0f, 0.1f), 0.0f,
+        juce::NormalisableRange<float>(-24.0f, 0.0f, 0.1f), 0.0f,
         juce::String(), juce::AudioProcessorParameter::genericParameter,
         [](float value, int) { return juce::String(value, 1) + " dBFS"; }));
 
@@ -246,6 +246,25 @@ QuadBlendDriveAudioProcessor::createParameterLayout()
     layout.add(std::make_unique<juce::AudioParameterBool>(
         "TRUE_PEAK_ENABLE", "True Peak", false));  // OFF by default
 
+    // === CHANNEL MANAGEMENT ===
+    // Channel Mode: 0 = Stereo (L/R), 1 = Mid-Side (M/S)
+    layout.add(std::make_unique<juce::AudioParameterChoice>(
+        "CHANNEL_MODE", "Channel Mode",
+        juce::StringArray{"Stereo", "Mid-Side"},
+        0));  // Default to Stereo
+
+    // Channel Link: 0% = Dual Mono (independent), 100% = Fully Linked
+    // Controls how much the dynamics detection is shared between channels
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        "CHANNEL_LINK", "Channel Link",
+        juce::NormalisableRange<float>(0.0f, 100.0f, 1.0f), 100.0f,
+        juce::String(), juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { return juce::String(static_cast<int>(value)) + " %"; }));
+
+    // Auto-Gain Compensation: Match output loudness to input for honest A/B
+    layout.add(std::make_unique<juce::AudioParameterBool>(
+        "AGC_ENABLE", "Auto-Gain Compensation", false));
+
     // Processing Mode: 0 = Zero Latency, 1 = Balanced (Halfband), 2 = Linear Phase
     layout.add(std::make_unique<juce::AudioParameterChoice>(
         "PROCESSING_MODE", "Processing Engine",
@@ -290,14 +309,19 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
 
     // Calculate MAXIMUM lookahead samples (for buffer allocation to support dynamic mode switching)
     // Use 3ms (Standard mode) at 16x OS rate (Linear Phase mode) at max sample rate (192kHz)
+    // IMPORTANT: Use hardcoded 192kHz max rate to ensure buffers can handle any sample rate change
     const int maxOsMultiplier = 16;  // Linear Phase mode
-    const double maxOsSampleRate = sampleRate * maxOsMultiplier;
+    constexpr double maxSystemSampleRate = 192000.0;  // Maximum supported sample rate
+    const double maxOsSampleRate = maxSystemSampleRate * maxOsMultiplier;
     const double maxLookaheadMs = 3.0;  // Standard mode
     const int maxLookaheadSamples = static_cast<int>(std::ceil(maxOsSampleRate * maxLookaheadMs / 1000.0));
 
     // Calculate CURRENT lookahead samples at current OS rate (used for actual processing)
     lookaheadSamples = static_cast<int>(std::ceil(osSampleRate * xyProcessorLookaheadMs / 1000.0));
     advancedTPLLookaheadSamples = static_cast<int>(std::ceil(osSampleRate * tplLookaheadMs / 1000.0));
+
+    // Maximum TPL lookahead samples for buffer allocation (handles sample rate changes)
+    const int maxTPLLookaheadSamples = static_cast<int>(std::ceil(maxOsSampleRate * tplLookaheadMs / 1000.0));
 
     // Calculate plugin latency reported to host
     // Latency = OS filter latency + XY processor lookahead (converted back to base rate)
@@ -314,8 +338,8 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
     {
         auto& state = advancedTPLState[ch];
 
-        // Initialize lookahead buffer
-        state.lookaheadBuffer.resize(advancedTPLLookaheadSamples, 0.0);
+        // Initialize lookahead buffer (use max size to handle sample rate changes)
+        state.lookaheadBuffer.resize(maxTPLLookaheadSamples, 0.0);
         state.lookaheadWritePos = 0;
         state.grEnvelope = 0.0;
         state.lowBandEnv = 0.0;
@@ -323,8 +347,8 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
         state.highBandEnv = 0.0;
         state.currentReleaseCoeff = 0.001;  // Default release
 
-        // Initialize OSM Mode 0 compensation delay buffer (matches Mode 1 lookahead)
-        osmCompensationState[ch].delayBuffer.resize(advancedTPLLookaheadSamples, 0.0);
+        // Initialize OSM Mode 0 compensation delay buffer (use max size for safety)
+        osmCompensationState[ch].delayBuffer.resize(maxTPLLookaheadSamples, 0.0);
         osmCompensationState[ch].writePos = 0;
 
         // Initialize dry delay buffer for parallel processing (OS rate)
@@ -335,7 +359,7 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
 
         // Design multiband filters for IRC at OS rate
         const double pi = juce::MathConstants<double>::pi;
-        const double fs = osSampleRate;  // Oversampled rate (1×, 8×, or 16×)
+        const double fs = (osSampleRate > 0.0) ? osSampleRate : 44100.0;  // Safe default if somehow 0
 
         // Low-pass filter: <200 Hz (2nd order Butterworth)
         {
@@ -419,12 +443,13 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
     // Mid band-pass: 250 Hz - 4 kHz
     // High-pass: 2nd order Butterworth at 4 kHz
     const double pi = juce::MathConstants<double>::pi;
+    const double safeSampleRate = (sampleRate > 0.0) ? sampleRate : 44100.0;  // Safe default
 
     for (int ch = 0; ch < 2; ++ch)
     {
         // Low-pass filter at 250 Hz
         double lowFreq = 250.0;
-        double lowOmega = 2.0 * pi * lowFreq / sampleRate;
+        double lowOmega = 2.0 * pi * lowFreq / safeSampleRate;
         double lowAlpha = std::sin(lowOmega) / (2.0 * 0.707);  // Q = 0.707 (Butterworth)
 
         oscFilters[ch].lowB0 = (1.0 - std::cos(lowOmega)) / 2.0;
@@ -439,7 +464,7 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
 
         // Band-pass filter: 250 Hz - 4 kHz (center at ~1 kHz)
         double midFreq = 1000.0;
-        double midOmega = 2.0 * pi * midFreq / sampleRate;
+        double midOmega = 2.0 * pi * midFreq / safeSampleRate;
         double bandwidth = 2.0;  // Wide bandwidth for 250-4000 Hz range
         double midAlpha = std::sin(midOmega) * std::sinh(std::log(2.0) / 2.0 * bandwidth * midOmega / std::sin(midOmega));
 
@@ -455,7 +480,7 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
 
         // High-pass filter at 4 kHz
         double highFreq = 4000.0;
-        double highOmega = 2.0 * pi * highFreq / sampleRate;
+        double highOmega = 2.0 * pi * highFreq / safeSampleRate;
         double highAlpha = std::sin(highOmega) / (2.0 * 0.707);  // Q = 0.707 (Butterworth)
 
         oscFilters[ch].highB0 = (1.0 + std::cos(highOmega)) / 2.0;
@@ -568,6 +593,10 @@ void QuadBlendDriveAudioProcessor::prepareToPlay(double sampleRate, int samplesP
     smoothedInputGain.reset(sampleRate, rampTimeSeconds);
     smoothedOutputGain.reset(sampleRate, rampTimeSeconds);
     smoothedMixWet.reset(sampleRate, rampTimeSeconds);
+    smoothedAgcGain.reset(sampleRate, 0.1);  // 100ms for smoother AGC transitions
+    smoothedAgcGain.setCurrentAndTargetValue(1.0f);
+    agcInputRMS.store(0.0f);
+    agcOutputRMS.store(0.0f);
 
     // Initialize per-processor envelope followers for smooth GR visualization
     for (int ch = 0; ch < 2; ++ch)
@@ -798,9 +827,13 @@ void QuadBlendDriveAudioProcessor::calculateNormalizationGain()
 {
     calibrationTargetDB = static_cast<double>(apvts.getRawParameterValue("CALIB_LEVEL")->load());
 
-    if (peakInputLevel > 0.0)
+    // Guard against log of zero/negative - use minimum threshold of -120dB (1e-6)
+    constexpr double minLevel = 1e-6;  // -120dB
+    if (peakInputLevel > minLevel)
     {
         double peakDB = 20.0 * std::log10(peakInputLevel);
+        // Clamp to valid range to prevent NaN propagation
+        peakDB = juce::jlimit(-120.0, 24.0, peakDB);
         currentPeakDB.store(peakDB);
 
         // Calculate gain needed to bring peak to calibration target
@@ -810,7 +843,7 @@ void QuadBlendDriveAudioProcessor::calculateNormalizationGain()
     }
     else
     {
-        currentPeakDB.store(-60.0);
+        currentPeakDB.store(-120.0);
         computedNormalizationGain = 1.0;
         normalizationGainDB.store(0.0);
     }
@@ -835,6 +868,8 @@ void QuadBlendDriveAudioProcessor::updateDecimatedDisplay()
         // Initialize min/max for this segment
         float waveformMin = 0.0f;
         float waveformMax = 0.0f;
+        float waveformMinL = 0.0f, waveformMaxL = 0.0f;
+        float waveformMinR = 0.0f, waveformMaxR = 0.0f;
         float grMin = 0.0f;
         float grMax = 0.0f;
         float sumLow = 0.0f;
@@ -868,6 +903,8 @@ void QuadBlendDriveAudioProcessor::updateDecimatedDisplay()
             {
                 waveformMin = waveform;
                 waveformMax = waveform;
+                waveformMinL = waveformMaxL = sample.waveformL;
+                waveformMinR = waveformMaxR = sample.waveformR;
                 grMin = sample.gainReduction;
                 grMax = sample.gainReduction;
 
@@ -889,6 +926,10 @@ void QuadBlendDriveAudioProcessor::updateDecimatedDisplay()
             {
                 waveformMin = std::min(waveformMin, waveform);
                 waveformMax = std::max(waveformMax, waveform);
+                waveformMinL = std::min(waveformMinL, sample.waveformL);
+                waveformMaxL = std::max(waveformMaxL, sample.waveformL);
+                waveformMinR = std::min(waveformMinR, sample.waveformR);
+                waveformMaxR = std::max(waveformMaxR, sample.waveformR);
                 grMin = std::min(grMin, sample.gainReduction);
                 grMax = std::max(grMax, sample.gainReduction);
 
@@ -929,6 +970,10 @@ void QuadBlendDriveAudioProcessor::updateDecimatedDisplay()
         // Store decimated segment with min/max envelope
         seg.waveformMin = waveformMin;
         seg.waveformMax = waveformMax;
+        seg.waveformMinL = waveformMinL;
+        seg.waveformMaxL = waveformMaxL;
+        seg.waveformMinR = waveformMinR;
+        seg.waveformMaxR = waveformMaxR;
         seg.grMin = grMin;
         seg.grMax = grMax;
         seg.avgLow = sumLow / static_cast<float>(samplesPerSegment);
@@ -978,6 +1023,12 @@ void QuadBlendDriveAudioProcessor::updateTransportState()
             currentlyPlaying = posInfo->getIsPlaying();
             if (auto samples = posInfo->getTimeInSamples())
                 currentSamplePos = *samples;
+            // Get tempo from host (default to 120 BPM if not available)
+            if (auto bpm = posInfo->getBpm())
+                currentBPM.store(*bpm);
+            // Get PPQ position for beat-synced display
+            if (auto ppq = posInfo->getPpqPosition())
+                currentPPQPosition.store(*ppq);
         }
     }
 
@@ -1036,6 +1087,22 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     const int totalNumInputChannels = getTotalNumInputChannels();
     const int totalNumOutputChannels = getTotalNumOutputChannels();
     const int numSamples = buffer.getNumSamples();
+
+    // DEBUG: Uncomment this block to test absolute zero-latency bypass
+    // If latency persists with this enabled, it's in JUCE/host, not our code
+    // #define DEBUG_ZERO_LATENCY_TEST
+    #ifdef DEBUG_ZERO_LATENCY_TEST
+    {
+        const int processingMode = static_cast<int>(apvts.getRawParameterValue("PROCESSING_MODE")->load());
+        if (processingMode == 0)
+        {
+            // Absolute minimum: just clear unused channels and return
+            for (int i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
+                buffer.clear(i, 0, numSamples);
+            return;  // Complete bypass - buffer passes through unchanged
+        }
+    }
+    #endif
 
     // === TRANSPORT STATE DETECTION ===
     updateTransportState();
@@ -1209,10 +1276,11 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     const SampleType flTrimDB = static_cast<SampleType>(apvts.getRawParameterValue("FL_TRIM")->load());
 
     // Read mute and solo states
-    bool hcMute = apvts.getRawParameterValue("HC_MUTE")->load() > 0.5f;
-    bool scMute = apvts.getRawParameterValue("SC_MUTE")->load() > 0.5f;
-    bool slMute = apvts.getRawParameterValue("SL_MUTE")->load() > 0.5f;
-    bool flMute = apvts.getRawParameterValue("FL_MUTE")->load() > 0.5f;
+    // Mute takes priority over solo (like an analog console - if it's cut, it's cut)
+    const bool hcMuteParam = apvts.getRawParameterValue("HC_MUTE")->load() > 0.5f;
+    const bool scMuteParam = apvts.getRawParameterValue("SC_MUTE")->load() > 0.5f;
+    const bool slMuteParam = apvts.getRawParameterValue("SL_MUTE")->load() > 0.5f;
+    const bool flMuteParam = apvts.getRawParameterValue("FL_MUTE")->load() > 0.5f;
 
     const bool hcSolo = apvts.getRawParameterValue("HC_SOLO")->load() > 0.5f;
     const bool scSolo = apvts.getRawParameterValue("SC_SOLO")->load() > 0.5f;
@@ -1220,16 +1288,23 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     const bool flSolo = apvts.getRawParameterValue("FL_SOLO")->load() > 0.5f;
 
     // Solo logic: if any processor is soloed, mute all non-soloed processors
+    // BUT explicit mute always takes priority (mute overrides solo)
     const bool anySolo = hcSolo || scSolo || slSolo || flSolo;
+    bool hcMute = hcMuteParam;  // Explicit mute always applies
+    bool scMute = scMuteParam;
+    bool slMute = slMuteParam;
+    bool flMute = flMuteParam;
     if (anySolo)
     {
-        if (!hcSolo) hcMute = true;
-        if (!scSolo) scMute = true;
-        if (!slSolo) slMute = true;
-        if (!flSolo) flMute = true;
+        // Only mute non-soloed processors that aren't already explicitly muted
+        if (!hcSolo && !hcMuteParam) hcMute = true;
+        if (!scSolo && !scMuteParam) scMute = true;
+        if (!slSolo && !slMuteParam) slMute = true;
+        if (!flSolo && !flMuteParam) flMute = true;
     }
 
     const bool deltaMode = apvts.getRawParameterValue("DELTA_MODE")->load() > 0.5f;
+    const bool agcEnabled = apvts.getRawParameterValue("AGC_ENABLE")->load() > 0.5f;
 
     const SampleType threshold = juce::Decibels::decibelsToGain(thresholdDB);
     SampleType inputGain = juce::Decibels::decibelsToGain(inputGainDB);
@@ -1363,6 +1438,24 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
         buffer.applyGain(normGain);
     }
 
+    // === CHANNEL MODE: M/S ENCODING ===
+    // 0 = Stereo (no change), 1 = Mid-Side
+    const int channelMode = static_cast<int>(apvts.getRawParameterValue("CHANNEL_MODE")->load());
+
+    if (channelMode == 1 && buffer.getNumChannels() >= 2)  // Mid-Side mode
+    {
+        // Encode L/R to M/S: Mid = (L+R)/2, Side = (L-R)/2
+        auto* left = buffer.getWritePointer(0);
+        auto* right = buffer.getWritePointer(1);
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const SampleType l = left[i];
+            const SampleType r = right[i];
+            left[i] = (l + r) * static_cast<SampleType>(0.5);   // Mid
+            right[i] = (l - r) * static_cast<SampleType>(0.5);  // Side
+        }
+    }
+
     // === CAPTURE NORMALIZED INPUT (After normalization, BEFORE input gain) ===
     // Used for wet signal when all processors muted, and for normal dry signal
     auto& normalizedInputBuffer = (std::is_same<SampleType, float>::value)
@@ -1390,12 +1483,21 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     const SampleType avgSmoothedInputGain = totalInputGainAccumulated / static_cast<SampleType>(numSamples);
     const SampleType totalInputGain = normGain * avgSmoothedInputGain;
 
-    // === STEREO I/O METERS: MEASURE INPUT TRUE PEAK (ITU-R BS.1770-4) ===
-    // Measure after input gain, before processing
-    float inPkL = measureTruePeak(buffer.getReadPointer(0), numSamples);
-    float inPkR = buffer.getNumChannels() > 1
-        ? measureTruePeak(buffer.getReadPointer(1), numSamples)
-        : inPkL;
+    // === STEREO I/O METERS: MEASURE INPUT SAMPLE PEAK ===
+    // Use sample peak for consistent metering with DAWs (true peak can read +3-4dB higher)
+    float inPkL = 0.0f;
+    float inPkR = 0.0f;
+    for (int i = 0; i < numSamples; ++i)
+    {
+        float absL = std::abs(static_cast<float>(buffer.getReadPointer(0)[i]));
+        if (absL > inPkL) inPkL = absL;
+        if (buffer.getNumChannels() > 1)
+        {
+            float absR = std::abs(static_cast<float>(buffer.getReadPointer(1)[i]));
+            if (absR > inPkR) inPkR = absR;
+        }
+    }
+    if (buffer.getNumChannels() == 1) inPkR = inPkL;
 
     // Update peak followers with instant attack, ~50ms release
     auto updatePeak = [](std::atomic<float>& peak, float blockPeak) {
@@ -1408,6 +1510,24 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
 
     updatePeak(inputPeakL, inPkL);
     updatePeak(inputPeakR, inPkR);
+
+    // === AGC INPUT RMS MEASUREMENT ===
+    // Measure pristine input RMS for auto-gain compensation
+    if (agcEnabled)
+    {
+        SampleType inputSumSquares = static_cast<SampleType>(0.0);
+        for (int ch = 0; ch < pristineInputBuffer.getNumChannels(); ++ch)
+        {
+            const auto* data = pristineInputBuffer.getReadPointer(ch);
+            for (int i = 0; i < numSamples; ++i)
+                inputSumSquares += data[i] * data[i];
+        }
+        float inputRms = std::sqrt(static_cast<float>(inputSumSquares) /
+                                   static_cast<float>(numSamples * pristineInputBuffer.getNumChannels()));
+        // Smooth input RMS measurement
+        float prevInputRms = agcInputRMS.load();
+        agcInputRMS.store(prevInputRms * 0.9f + inputRms * 0.1f);
+    }
 
     // Calculate bi-linear blend weights from XY pad
     // XY Grid Layout: Top-Left=HC, Top-Right=FL, Bottom-Left=SC, Bottom-Right=SL
@@ -1692,23 +1812,31 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
         SampleType wSL = xyX * (static_cast<SampleType>(1.0) - xyY);  // Bottom-right
 
         // Apply mute and solo logic
-        bool hcMute = apvts.getRawParameterValue("HC_MUTE")->load() > 0.5f;
-        bool scMute = apvts.getRawParameterValue("SC_MUTE")->load() > 0.5f;
-        bool slMute = apvts.getRawParameterValue("SL_MUTE")->load() > 0.5f;
-        bool flMute = apvts.getRawParameterValue("FL_MUTE")->load() > 0.5f;
+        // Mute takes priority over solo (like an analog console - if it's cut, it's cut)
+        const bool hcMuteParam = apvts.getRawParameterValue("HC_MUTE")->load() > 0.5f;
+        const bool scMuteParam = apvts.getRawParameterValue("SC_MUTE")->load() > 0.5f;
+        const bool slMuteParam = apvts.getRawParameterValue("SL_MUTE")->load() > 0.5f;
+        const bool flMuteParam = apvts.getRawParameterValue("FL_MUTE")->load() > 0.5f;
 
         const bool hcSolo = apvts.getRawParameterValue("HC_SOLO")->load() > 0.5f;
         const bool scSolo = apvts.getRawParameterValue("SC_SOLO")->load() > 0.5f;
         const bool slSolo = apvts.getRawParameterValue("SL_SOLO")->load() > 0.5f;
         const bool flSolo = apvts.getRawParameterValue("FL_SOLO")->load() > 0.5f;
 
+        // Solo logic: if any processor is soloed, mute all non-soloed processors
+        // BUT explicit mute always takes priority (mute overrides solo)
         const bool anySolo = hcSolo || scSolo || slSolo || flSolo;
+        bool hcMute = hcMuteParam;  // Explicit mute always applies
+        bool scMute = scMuteParam;
+        bool slMute = slMuteParam;
+        bool flMute = flMuteParam;
         if (anySolo)
         {
-            if (!hcSolo) hcMute = true;
-            if (!scSolo) scMute = true;
-            if (!slSolo) slMute = true;
-            if (!flSolo) flMute = true;
+            // Only mute non-soloed processors that aren't already explicitly muted
+            if (!hcSolo && !hcMuteParam) hcMute = true;
+            if (!scSolo && !scMuteParam) scMute = true;
+            if (!slSolo && !slMuteParam) slMute = true;
+            if (!flSolo && !flMuteParam) flMute = true;
         }
 
         if (hcMute) wHC = static_cast<SampleType>(0.0);
@@ -1743,18 +1871,26 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
         }
 
         // Apply gains to dry signal to match wet signal path:
+        // 0. Normalization gain (wet has this, dry captured from pristineInputBuffer doesn't)
         // 1. Input gain (wet has this from before oversampling, dry doesn't)
         // 2. Weighted trim gain (wet has this from processXYBlend, dry doesn't)
         // 3. Inverse input gain (wet gets this, dry should too)
         // 4. Output gain (wet gets this, dry should too)
+        const SampleType deltaCompNormGain = normalizationEnabled
+            ? static_cast<SampleType>(computedNormalizationGain)
+            : static_cast<SampleType>(1.0);
+
         for (int ch = 0; ch < dryBuffer.getNumChannels(); ++ch)
         {
             auto* dry = dryBuffer.getWritePointer(ch);
 
             for (int i = 0; i < numSamples; ++i)
             {
+                // Apply normalization gain (to match wet - critical for calibration compensation)
+                SampleType compensatedDry = dry[i] * deltaCompNormGain;
+
                 // Apply input gain (to match wet)
-                SampleType compensatedDry = dry[i] * inputGain;
+                compensatedDry *= inputGain;
 
                 // Apply weighted trim gain (to match wet)
                 compensatedDry *= weightedTrimGain;
@@ -1851,7 +1987,9 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     // === SIMPLIFIED OUTPUT LIMITING ===
     // Both limiters share the same ceiling
     const bool overshootEnabled = apvts.getRawParameterValue("OVERSHOOT_ENABLE")->load() > 0.5f;
-    const bool truePeakEnabled = apvts.getRawParameterValue("TRUE_PEAK_ENABLE")->load() > 0.5f;
+    // True Peak Limiter is disabled in Zero Latency mode (requires lookahead)
+    const bool truePeakEnabled = (processingMode != 0) &&
+                                 (apvts.getRawParameterValue("TRUE_PEAK_ENABLE")->load() > 0.5f);
     const SampleType outputCeilingDB = static_cast<SampleType>(apvts.getRawParameterValue("OUTPUT_CEILING")->load());
     const bool overshootDeltaMode = apvts.getRawParameterValue("OVERSHOOT_DELTA_MODE")->load() > 0.5f;
     const bool truePeakDeltaMode = apvts.getRawParameterValue("TRUE_PEAK_DELTA_MODE")->load() > 0.5f;
@@ -1927,12 +2065,90 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
         }
     }
 
-    // === STEREO I/O METERS: MEASURE OUTPUT TRUE PEAK (ITU-R BS.1770-4) ===
-    // Measure after limiters and output gain - final output going to DAW
-    float outPkL = measureTruePeak(buffer.getReadPointer(0), numSamples);
-    float outPkR = buffer.getNumChannels() > 1
-        ? measureTruePeak(buffer.getReadPointer(1), numSamples)
-        : outPkL;
+    // === CHANNEL MODE: M/S DECODING ===
+    // Convert back from M/S to L/R for output (if M/S mode was used)
+    // Must happen AFTER all processing but BEFORE output metering
+    if (channelMode == 1 && buffer.getNumChannels() >= 2)  // Mid-Side mode - decode back to L/R
+    {
+        // Decode M/S to L/R: Left = Mid + Side, Right = Mid - Side
+        auto* mid = buffer.getWritePointer(0);
+        auto* side = buffer.getWritePointer(1);
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const SampleType m = mid[i];
+            const SampleType s = side[i];
+            mid[i] = m + s;   // Left = Mid + Side
+            side[i] = m - s;  // Right = Mid - Side
+        }
+    }
+    // Note: Mono mode (channelMode == 2) doesn't need decoding - both channels stay identical
+
+    // === AGC (AUTO-GAIN COMPENSATION) ===
+    // Match output loudness to input for honest A/B comparison
+    if (agcEnabled && !deltaMode)
+    {
+        // Measure output RMS
+        SampleType outputSumSquares = static_cast<SampleType>(0.0);
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+        {
+            const auto* data = buffer.getReadPointer(ch);
+            for (int i = 0; i < numSamples; ++i)
+                outputSumSquares += data[i] * data[i];
+        }
+        float outputRms = std::sqrt(static_cast<float>(outputSumSquares) /
+                                    static_cast<float>(numSamples * buffer.getNumChannels()));
+
+        // Smooth output RMS measurement
+        float prevOutputRms = agcOutputRMS.load();
+        agcOutputRMS.store(prevOutputRms * 0.9f + outputRms * 0.1f);
+
+        // Calculate and apply AGC gain
+        float smoothedInputRms = agcInputRMS.load();
+        float smoothedOutputRms = agcOutputRMS.load();
+
+        if (smoothedOutputRms > 0.0001f && smoothedInputRms > 0.0001f)
+        {
+            float targetAgcGain = smoothedInputRms / smoothedOutputRms;
+            // Clamp AGC gain to reasonable range (±12dB)
+            targetAgcGain = juce::jlimit(0.25f, 4.0f, targetAgcGain);
+
+            // Update smoothed AGC gain
+            smoothedAgcGain.setTargetValue(targetAgcGain);
+
+            // Apply smoothed AGC gain per-sample to prevent zipper noise
+            for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+            {
+                auto* data = buffer.getWritePointer(ch);
+                for (int i = 0; i < numSamples; ++i)
+                {
+                    data[i] *= static_cast<SampleType>(smoothedAgcGain.getNextValue());
+                }
+            }
+        }
+    }
+    else if (!agcEnabled)
+    {
+        // Reset AGC state when disabled
+        smoothedAgcGain.setCurrentAndTargetValue(1.0f);
+        agcInputRMS.store(0.0f);
+        agcOutputRMS.store(0.0f);
+    }
+
+    // === STEREO I/O METERS: MEASURE OUTPUT SAMPLE PEAK ===
+    // Use sample peak for consistent metering with DAWs (true peak can read +3-4dB higher)
+    float outPkL = 0.0f;
+    float outPkR = 0.0f;
+    for (int i = 0; i < numSamples; ++i)
+    {
+        float absL = std::abs(static_cast<float>(buffer.getReadPointer(0)[i]));
+        if (absL > outPkL) outPkL = absL;
+        if (buffer.getNumChannels() > 1)
+        {
+            float absR = std::abs(static_cast<float>(buffer.getReadPointer(1)[i]));
+            if (absR > outPkR) outPkR = absR;
+        }
+    }
+    if (buffer.getNumChannels() == 1) outPkR = outPkL;
 
     updatePeak(outputPeakL, outPkL);
     updatePeak(outputPeakR, outPkR);
@@ -2293,6 +2509,7 @@ void QuadBlendDriveAudioProcessor::processSoftClip(juce::AudioBuffer<SampleType>
 // Fast release (20-40ms) for transients, slow release (200-600ms) for sustained material
 // Dynamically blended based on signal crest factor with exponential smoothing
 // MODE-AWARE: Zero Latency = no oversampling, Balanced/Linear Phase = 8x oversampling
+// CHANNEL LINKING: 0% = dual mono (independent), 100% = fully linked (max of both channels)
 template<typename SampleType>
 void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType>& buffer,
                                                       SampleType threshold,
@@ -2302,6 +2519,10 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
 {
     // Get current processing mode from osManager
     const int processingMode = osManager.getProcessingMode();
+
+    // Get channel linking amount (0% = dual mono, 100% = fully linked)
+    const float channelLink = apvts.getRawParameterValue("CHANNEL_LINK")->load() / 100.0f;
+    const bool isStereo = buffer.getNumChannels() >= 2;
 
     // Fixed parameters for Slow Limiter
     const double attackMsD = static_cast<double>(attackMs);  // User-adjustable attack
@@ -2318,7 +2539,8 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
 
     // Time constants for envelope followers
     // MODE 0: direct sample rate, MODE 1-2: oversampled rate
-    const double effectiveRate = (processingMode == 0) ? sampleRate : (sampleRate * 8.0);
+    const double safeSampleRate = (sampleRate > 0.0) ? sampleRate : 44100.0;
+    const double effectiveRate = (processingMode == 0) ? safeSampleRate : (safeSampleRate * 8.0);
     const double rmsTimeMs = 50.0;                 // RMS averaging time
     const double peakTimeMs = 10.0;                // Peak tracking time
     const double crestSmoothTimeMs = 100.0;        // Crest factor smoothing time
@@ -2337,30 +2559,37 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
     const double gainSmoothCoeff = std::exp(-2.0 * juce::MathConstants<double>::pi * gainSmoothCutoff / effectiveRate);
 
     // MODE 0: Zero Latency - NO oversampling, NO lookahead, direct processing
+    // With channel linking support: 0% = dual mono, 100% = fully linked (max of both)
     if (processingMode == 0)
     {
-        for (int ch = 0; ch < juce::jmin(buffer.getNumChannels(), 2); ++ch)
-        {
-            auto* data = buffer.getWritePointer(ch);
-            double& envelope = slowLimiterState[ch].envelope;
-            double& rmsEnvelope = slowLimiterState[ch].rmsEnvelope;
-            double& peakEnvelope = slowLimiterState[ch].peakEnvelope;
-            double& smoothedCrestFactor = slowLimiterState[ch].smoothedCrestFactor;
-            double& smoothedGain = slowLimiterState[ch].smoothedGain;
+        const int numChannels = juce::jmin(buffer.getNumChannels(), 2);
+        const int numSamples = buffer.getNumSamples();
 
-            for (int i = 0; i < buffer.getNumSamples(); ++i)
+        // Process sample-by-sample for proper channel linking
+        for (int i = 0; i < numSamples; ++i)
+        {
+            // === PHASE 1: Detect input levels on all channels ===
+            double channelInputEnv[2] = {0.0, 0.0};
+            double channelEnvelope[2] = {0.0, 0.0};
+
+            for (int ch = 0; ch < numChannels; ++ch)
             {
+                auto* data = buffer.getWritePointer(ch);
+                double& envelope = slowLimiterState[ch].envelope;
+                double& rmsEnvelope = slowLimiterState[ch].rmsEnvelope;
+                double& smoothedCrestFactor = slowLimiterState[ch].smoothedCrestFactor;
+
                 const double currentSample = static_cast<double>(data[i]);
                 const double inputAbs = std::abs(currentSample);
-                const double inputEnvelope = inputAbs;  // Simple peak detection
+                channelInputEnv[ch] = inputAbs;
 
-                // Track RMS for crest factor calculation (still needed for adaptive release)
+                // Track RMS for crest factor calculation
                 const double inputSquared = currentSample * currentSample;
                 rmsEnvelope = rmsCoeff * rmsEnvelope + (1.0 - rmsCoeff) * inputSquared;
                 const double rmsValue = std::sqrt(juce::jmax(1e-10, rmsEnvelope));
 
-                // Calculate crest factor using detected envelope vs RMS
-                const double instantCrestFactor = inputEnvelope / rmsValue;
+                // Calculate crest factor
+                const double instantCrestFactor = inputAbs / rmsValue;
                 smoothedCrestFactor = crestSmoothCoeff * smoothedCrestFactor +
                                       (1.0 - crestSmoothCoeff) * instantCrestFactor;
 
@@ -2369,38 +2598,64 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
                 const double minRelease = fastReleaseMinMs + crestNorm * (slowReleaseMinMs - fastReleaseMinMs);
                 const double maxRelease = fastReleaseMaxMs + crestNorm * (slowReleaseMaxMs - fastReleaseMaxMs);
 
-                const double overAmount = juce::jmax(0.0, inputEnvelope - thresholdD);
+                const double overAmount = juce::jmax(0.0, inputAbs - thresholdD);
                 const double adaptiveFactor = overAmount / (thresholdD + 1e-10);
                 const double adaptiveReleaseMs = juce::jlimit(minRelease, maxRelease,
                                                              minRelease + (maxRelease - minRelease) * adaptiveFactor);
 
                 const double releaseCoeff = std::exp(-1.0 / (adaptiveReleaseMs * 0.001 * effectiveRate));
 
-                // Attack/release envelope follower using TransientPreservingEnvelope output
-                if (inputEnvelope > envelope)
-                    envelope = attackCoeff * envelope + (1.0 - attackCoeff) * inputEnvelope;
+                // Attack/release envelope follower
+                if (inputAbs > envelope)
+                    envelope = attackCoeff * envelope + (1.0 - attackCoeff) * inputAbs;
                 else
-                    envelope = releaseCoeff * envelope + (1.0 - releaseCoeff) * inputEnvelope;
+                    envelope = releaseCoeff * envelope + (1.0 - releaseCoeff) * inputAbs;
 
-                // Calculate raw gain reduction with soft knee (NO lookahead delay)
+                channelEnvelope[ch] = envelope;
+            }
+
+            // === PHASE 2: Compute linked envelope ===
+            // 0% link = dual mono (each channel uses own envelope)
+            // 100% link = fully linked (both channels use max envelope)
+            double maxEnvelope = 0.0;
+            if (isStereo && numChannels >= 2)
+            {
+                maxEnvelope = juce::jmax(channelEnvelope[0], channelEnvelope[1]);
+            }
+
+            // === PHASE 3: Calculate and apply gain reduction ===
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                auto* data = buffer.getWritePointer(ch);
+                const double currentSample = static_cast<double>(data[i]);
+
+                // Blend between channel's own envelope and max envelope based on link amount
+                double detectionEnvelope = channelEnvelope[ch];
+                if (isStereo && channelLink > 0.0f)
+                {
+                    detectionEnvelope = channelEnvelope[ch] + static_cast<double>(channelLink) * (maxEnvelope - channelEnvelope[ch]);
+                }
+
+                // Calculate gain reduction with soft knee
                 double targetGain = 1.0;
-                if (envelope <= kneeStart)
+                const double kneeRange = thresholdD - kneeStart;
+                if (detectionEnvelope <= kneeStart)
                 {
                     targetGain = 1.0;
                 }
-                else if (envelope < thresholdD)
+                else if (detectionEnvelope < thresholdD && kneeRange > 1e-10)
                 {
-                    const double kneePos = (envelope - kneeStart) / (thresholdD - kneeStart);
+                    // Guard against division by zero when knee is very small
+                    const double kneePos = (detectionEnvelope - kneeStart) / kneeRange;
                     const double compressionAmount = kneePos * kneePos;
-                    targetGain = 1.0 - compressionAmount * (1.0 - thresholdD / envelope);
+                    targetGain = 1.0 - compressionAmount * (1.0 - thresholdD / detectionEnvelope);
                 }
-                else
+                else if (detectionEnvelope > 1e-10)
                 {
-                    targetGain = thresholdD / envelope;
+                    targetGain = thresholdD / detectionEnvelope;
                 }
 
-                // MODE 0: No gain smoothing (no oversampling = no aliasing to prevent)
-                // Apply gain directly for truly transparent zero-latency processing
+                // Apply gain directly (MODE 0: no smoothing needed)
                 const double limitedSample = currentSample * targetGain;
                 data[i] = static_cast<SampleType>(limitedSample);
             }
@@ -2409,100 +2664,119 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
     }
 
     // MODE 1 & 2: Architecture A - Process with lookahead (buffer already at OS rate)
-    const int numSamples = buffer.getNumSamples();
-    for (int ch = 0; ch < juce::jmin(buffer.getNumChannels(), 2); ++ch)
+    // With channel linking support: 0% = dual mono, 100% = fully linked (max of both)
     {
-        auto* data = buffer.getWritePointer(ch);
-        double& envelope = slowLimiterState[ch].envelope;
-        double& rmsEnvelope = slowLimiterState[ch].rmsEnvelope;
-        double& peakEnvelope = slowLimiterState[ch].peakEnvelope;
-        double& smoothedCrestFactor = slowLimiterState[ch].smoothedCrestFactor;
-        double& smoothedGain = slowLimiterState[ch].smoothedGain;
-        auto& lookaheadBuffer = slowLimiterState[ch].lookaheadBuffer;
-        int& writePos = slowLimiterState[ch].lookaheadWritePos;
+        const int numChannels = juce::jmin(buffer.getNumChannels(), 2);
+        const int numSamples = buffer.getNumSamples();
 
+        // Process sample-by-sample for proper channel linking
         for (int i = 0; i < numSamples; ++i)
         {
-            const double currentSample = static_cast<double>(data[i]);
+            // === PHASE 1: Handle lookahead buffers and detect levels ===
+            double channelEnvelope[2] = {0.0, 0.0};
+            double delayedSamples[2] = {0.0, 0.0};
 
-            // Store current sample in lookahead buffer
-            if (writePos >= 0 && writePos < static_cast<int>(lookaheadBuffer.size()))
-                lookaheadBuffer[writePos] = currentSample;
-
-            // Read delayed sample (3ms ago)
-            int readPos = (writePos + 1) % lookaheadSamples;
-            double delayedSample = currentSample;
-            if (readPos >= 0 && readPos < static_cast<int>(lookaheadBuffer.size()))
-                delayedSample = lookaheadBuffer[readPos];
-
-            writePos = (writePos + 1) % lookaheadSamples;
-
-            const double inputAbs = std::abs(currentSample);
-            const double inputEnvelope = inputAbs;  // Simple peak detection
-
-            // Track RMS for crest factor calculation (still needed for adaptive release)
-            const double inputSquared = currentSample * currentSample;
-            rmsEnvelope = rmsCoeff * rmsEnvelope + (1.0 - rmsCoeff) * inputSquared;
-            const double rmsValue = std::sqrt(juce::jmax(1e-10, rmsEnvelope));
-
-            // Calculate instantaneous crest factor using detected envelope vs RMS
-            // High crest factor = transient/spiky signal → fast release
-            // Low crest factor = sustained/dense signal → slow release
-            const double instantCrestFactor = inputEnvelope / rmsValue;
-
-            // Exponentially smooth the crest factor to avoid jumps
-            smoothedCrestFactor = crestSmoothCoeff * smoothedCrestFactor +
-                                  (1.0 - crestSmoothCoeff) * instantCrestFactor;
-
-            // Map crest factor to release time
-            // Crest factors typically range from 1.0 (square wave) to 10+ (very transient)
-            // Normalize to 0-1 range: crestNorm = 0 for sustained, 1 for transient
-            const double crestNorm = juce::jlimit(0.0, 1.0, (smoothedCrestFactor - 1.0) / 9.0);
-
-            // Blend between slow and fast release based on crest factor
-            // High crest (transient) → fast release, Low crest (sustained) → slow release
-            const double minRelease = fastReleaseMinMs + crestNorm * (slowReleaseMinMs - fastReleaseMinMs);
-            const double maxRelease = fastReleaseMaxMs + crestNorm * (slowReleaseMaxMs - fastReleaseMaxMs);
-
-            // Further adapt within the range based on how much we're over threshold
-            const double overAmount = juce::jmax(0.0, inputEnvelope - thresholdD);
-            const double adaptiveFactor = overAmount / (thresholdD + 1e-10);
-            const double adaptiveReleaseMs = juce::jlimit(minRelease, maxRelease,
-                                                         minRelease + (maxRelease - minRelease) * adaptiveFactor);
-
-            const double releaseCoeff = std::exp(-1.0 / (adaptiveReleaseMs * 0.001 * effectiveRate));
-
-            // Attack/release envelope follower using TransientPreservingEnvelope output
-            if (inputEnvelope > envelope)
-                envelope = attackCoeff * envelope + (1.0 - attackCoeff) * inputEnvelope;
-            else
-                envelope = releaseCoeff * envelope + (1.0 - releaseCoeff) * inputEnvelope;
-
-            // Calculate raw gain reduction with soft knee
-            double targetGain = 1.0;
-
-            if (envelope <= kneeStart)
+            for (int ch = 0; ch < numChannels; ++ch)
             {
-                targetGain = 1.0;  // No limiting
-            }
-            else if (envelope < thresholdD)
-            {
-                // Soft knee region
-                const double kneePos = (envelope - kneeStart) / (thresholdD - kneeStart);
-                const double compressionAmount = kneePos * kneePos;  // Smooth curve
-                targetGain = 1.0 - compressionAmount * (1.0 - thresholdD / envelope);
-            }
-            else
-            {
-                // Above threshold - apply limiting
-                targetGain = thresholdD / envelope;
+                auto* data = buffer.getWritePointer(ch);
+                double& envelope = slowLimiterState[ch].envelope;
+                double& rmsEnvelope = slowLimiterState[ch].rmsEnvelope;
+                double& smoothedCrestFactor = slowLimiterState[ch].smoothedCrestFactor;
+                auto& lookaheadBuffer = slowLimiterState[ch].lookaheadBuffer;
+                int& writePos = slowLimiterState[ch].lookaheadWritePos;
+
+                const double currentSample = static_cast<double>(data[i]);
+
+                // Store current sample in lookahead buffer
+                if (writePos >= 0 && writePos < static_cast<int>(lookaheadBuffer.size()))
+                    lookaheadBuffer[writePos] = currentSample;
+
+                // Read delayed sample (3ms ago)
+                int readPos = (writePos + 1) % lookaheadSamples;
+                delayedSamples[ch] = currentSample;
+                if (readPos >= 0 && readPos < static_cast<int>(lookaheadBuffer.size()))
+                    delayedSamples[ch] = lookaheadBuffer[readPos];
+
+                writePos = (writePos + 1) % lookaheadSamples;
+
+                const double inputAbs = std::abs(currentSample);
+
+                // Track RMS for crest factor calculation
+                const double inputSquared = currentSample * currentSample;
+                rmsEnvelope = rmsCoeff * rmsEnvelope + (1.0 - rmsCoeff) * inputSquared;
+                const double rmsValue = std::sqrt(juce::jmax(1e-10, rmsEnvelope));
+
+                // Calculate and smooth crest factor
+                const double instantCrestFactor = inputAbs / rmsValue;
+                smoothedCrestFactor = crestSmoothCoeff * smoothedCrestFactor +
+                                      (1.0 - crestSmoothCoeff) * instantCrestFactor;
+
+                // Map crest factor to release time
+                const double crestNorm = juce::jlimit(0.0, 1.0, (smoothedCrestFactor - 1.0) / 9.0);
+                const double minRelease = fastReleaseMinMs + crestNorm * (slowReleaseMinMs - fastReleaseMinMs);
+                const double maxRelease = fastReleaseMaxMs + crestNorm * (slowReleaseMaxMs - fastReleaseMaxMs);
+
+                const double overAmount = juce::jmax(0.0, inputAbs - thresholdD);
+                const double adaptiveFactor = overAmount / (thresholdD + 1e-10);
+                const double adaptiveReleaseMs = juce::jlimit(minRelease, maxRelease,
+                                                             minRelease + (maxRelease - minRelease) * adaptiveFactor);
+
+                const double releaseCoeff = std::exp(-1.0 / (adaptiveReleaseMs * 0.001 * effectiveRate));
+
+                // Attack/release envelope follower
+                if (inputAbs > envelope)
+                    envelope = attackCoeff * envelope + (1.0 - attackCoeff) * inputAbs;
+                else
+                    envelope = releaseCoeff * envelope + (1.0 - releaseCoeff) * inputAbs;
+
+                channelEnvelope[ch] = envelope;
             }
 
-            // Apply one-pole low-pass filter to gain signal (prevents control signal aliasing)
-            smoothedGain = gainSmoothCoeff * smoothedGain + (1.0 - gainSmoothCoeff) * targetGain;
+            // === PHASE 2: Compute linked envelope ===
+            double maxEnvelope = 0.0;
+            if (isStereo && numChannels >= 2)
+            {
+                maxEnvelope = juce::jmax(channelEnvelope[0], channelEnvelope[1]);
+            }
 
-            const double limitedSample = delayedSample * smoothedGain;
-            data[i] = static_cast<SampleType>(limitedSample);
+            // === PHASE 3: Calculate and apply gain reduction ===
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                auto* data = buffer.getWritePointer(ch);
+                double& smoothedGain = slowLimiterState[ch].smoothedGain;
+
+                // Blend between channel's own envelope and max envelope based on link amount
+                double detectionEnvelope = channelEnvelope[ch];
+                if (isStereo && channelLink > 0.0f)
+                {
+                    detectionEnvelope = channelEnvelope[ch] + static_cast<double>(channelLink) * (maxEnvelope - channelEnvelope[ch]);
+                }
+
+                // Calculate gain reduction with soft knee
+                double targetGain = 1.0;
+                const double kneeRange = thresholdD - kneeStart;
+                if (detectionEnvelope <= kneeStart)
+                {
+                    targetGain = 1.0;
+                }
+                else if (detectionEnvelope < thresholdD && kneeRange > 1e-10)
+                {
+                    // Guard against division by zero when knee is very small
+                    const double kneePos = (detectionEnvelope - kneeStart) / kneeRange;
+                    const double compressionAmount = kneePos * kneePos;
+                    targetGain = 1.0 - compressionAmount * (1.0 - thresholdD / detectionEnvelope);
+                }
+                else if (detectionEnvelope > 1e-10)
+                {
+                    targetGain = thresholdD / detectionEnvelope;
+                }
+
+                // Apply gain smoothing (prevents control signal aliasing with oversampling)
+                smoothedGain = gainSmoothCoeff * smoothedGain + (1.0 - gainSmoothCoeff) * targetGain;
+
+                const double limitedSample = delayedSamples[ch] * smoothedGain;
+                data[i] = static_cast<SampleType>(limitedSample);
+            }
         }
     }
 }
@@ -2510,6 +2784,7 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
 // Fast Limiting - Hard knee limiting with fixed 10ms release
 // Attack: 1ms, Release: 10ms (fixed), Hard knee, Lookahead: 3ms
 // MODE-AWARE: Zero Latency = no oversampling, Balanced/Linear Phase = 8x oversampling
+// CHANNEL LINKING: 0% = dual mono (independent), 100% = fully linked (max of both channels)
 template<typename SampleType>
 void QuadBlendDriveAudioProcessor::processFastLimit(juce::AudioBuffer<SampleType>& buffer,
                                                       SampleType threshold,
@@ -2519,63 +2794,85 @@ void QuadBlendDriveAudioProcessor::processFastLimit(juce::AudioBuffer<SampleType
     // Get current processing mode from osManager
     const int processingMode = osManager.getProcessingMode();
 
+    // Get channel linking amount (0% = dual mono, 100% = fully linked)
+    const float channelLink = apvts.getRawParameterValue("CHANNEL_LINK")->load() / 100.0f;
+    const bool isStereo = buffer.getNumChannels() >= 2;
+
     // Fixed parameters for Fast Limiter
     const double attackMsD = static_cast<double>(attackMs);  // User-adjustable attack
     const double releaseMs = 10.0;                            // 10ms release (fixed)
 
     // MODE 0: direct sample rate, MODE 1-2: oversampled rate
-    const double effectiveRate = (processingMode == 0) ? currentSampleRate : (currentSampleRate * 8.0);
+    const double safeSampleRate = (currentSampleRate > 0.0) ? currentSampleRate : 44100.0;
+    const double effectiveRate = (processingMode == 0) ? safeSampleRate : (safeSampleRate * 8.0);
 
     const double attackCoeff = std::exp(-1.0 / (attackMsD * 0.001 * effectiveRate));
     const double releaseCoeff = std::exp(-1.0 / (releaseMs * 0.001 * effectiveRate));
     const double thresholdD = static_cast<double>(threshold);
 
     // Gain smoothing filter coefficient to prevent control signal aliasing
-    // Cutoff ~20kHz at the effective sample rate (prevents GR signal from aliasing)
-    const double gainSmoothCutoff = 20000.0;  // 20 kHz cutoff
+    const double gainSmoothCutoff = 20000.0;
     const double gainSmoothCoeff = std::exp(-2.0 * juce::MathConstants<double>::pi * gainSmoothCutoff / effectiveRate);
 
     // MODE 0: Zero Latency - NO oversampling, NO lookahead, direct processing
+    // With channel linking support
     if (processingMode == 0)
     {
-        for (int ch = 0; ch < juce::jmin(buffer.getNumChannels(), 2); ++ch)
-        {
-            auto* data = buffer.getWritePointer(ch);
-            double& envelope = fastLimiterState[ch].envelope;
-            double& smoothedGain = fastLimiterState[ch].smoothedGain;
+        const int numChannels = juce::jmin(buffer.getNumChannels(), 2);
+        const int numSamples = buffer.getNumSamples();
 
-            for (int i = 0; i < buffer.getNumSamples(); ++i)
+        for (int i = 0; i < numSamples; ++i)
+        {
+            // === PHASE 1: Detect envelope on all channels ===
+            double channelEnvelope[2] = {0.0, 0.0};
+
+            for (int ch = 0; ch < numChannels; ++ch)
             {
+                auto* data = buffer.getWritePointer(ch);
+                double& envelope = fastLimiterState[ch].envelope;
+
                 const double currentSample = static_cast<double>(data[i]);
                 const double inputAbs = std::abs(currentSample);
 
-                // Envelope follower with attack/adaptive release
+                // Envelope follower with attack/release
                 if (inputAbs > envelope)
-                {
-                    // Attack phase: immediate gain reduction
                     envelope = attackCoeff * envelope + (1.0 - attackCoeff) * inputAbs;
-                }
                 else
-                {
-                    // Release phase: fixed 10ms release
                     envelope = releaseCoeff * envelope + (1.0 - releaseCoeff) * inputAbs;
-                }
 
-                // Clamp envelope to prevent extreme values
                 envelope = juce::jlimit(0.0, 10.0, envelope);
+                channelEnvelope[ch] = envelope;
+            }
 
-                // Calculate raw gain reduction - hard knee limiting (NO lookahead delay)
-                double targetGain = 1.0;
-                if (envelope > thresholdD)
+            // === PHASE 2: Compute linked envelope ===
+            double maxEnvelope = 0.0;
+            if (isStereo && numChannels >= 2)
+            {
+                maxEnvelope = juce::jmax(channelEnvelope[0], channelEnvelope[1]);
+            }
+
+            // === PHASE 3: Calculate and apply gain reduction ===
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                auto* data = buffer.getWritePointer(ch);
+                const double currentSample = static_cast<double>(data[i]);
+
+                // Blend between channel's own envelope and max envelope
+                double detectionEnvelope = channelEnvelope[ch];
+                if (isStereo && channelLink > 0.0f)
                 {
-                    targetGain = thresholdD / envelope;
+                    detectionEnvelope = channelEnvelope[ch] + static_cast<double>(channelLink) * (maxEnvelope - channelEnvelope[ch]);
                 }
 
-                // Clamp target gain to prevent artifacts
+                // Calculate gain reduction - hard knee
+                double targetGain = 1.0;
+                if (detectionEnvelope > thresholdD)
+                {
+                    targetGain = thresholdD / detectionEnvelope;
+                }
                 targetGain = juce::jlimit(0.01, 1.0, targetGain);
 
-                // MODE 0: No gain smoothing (no oversampling = no aliasing to prevent)
-                // Apply gain directly for truly transparent zero-latency processing
+                // Apply gain directly (MODE 0: no smoothing needed)
                 const double limitedSample = currentSample * targetGain;
                 data[i] = static_cast<SampleType>(limitedSample);
             }
@@ -2584,64 +2881,84 @@ void QuadBlendDriveAudioProcessor::processFastLimit(juce::AudioBuffer<SampleType
     }
 
     // MODE 1 & 2: Architecture A - Process with lookahead (buffer already at OS rate)
-    const int numSamples = buffer.getNumSamples();
-    for (int ch = 0; ch < juce::jmin(buffer.getNumChannels(), 2); ++ch)
+    // With channel linking support
     {
-        auto* data = buffer.getWritePointer(ch);
-        double& envelope = fastLimiterState[ch].envelope;
-        double& smoothedGain = fastLimiterState[ch].smoothedGain;
-        auto& lookaheadBuffer = fastLimiterState[ch].lookaheadBuffer;
-        int& writePos = fastLimiterState[ch].lookaheadWritePos;
+        const int numChannels = juce::jmin(buffer.getNumChannels(), 2);
+        const int numSamples = buffer.getNumSamples();
 
         for (int i = 0; i < numSamples; ++i)
         {
-            const double currentSample = static_cast<double>(data[i]);
+            // === PHASE 1: Handle lookahead and detect envelope ===
+            double channelEnvelope[2] = {0.0, 0.0};
+            double delayedSamples[2] = {0.0, 0.0};
 
-            // Store current sample in lookahead buffer with bounds checking
-            if (writePos >= 0 && writePos < static_cast<int>(lookaheadBuffer.size()))
-                lookaheadBuffer[writePos] = currentSample;
-
-            // Read delayed sample (3ms ago)
-            int readPos = (writePos + 1) % lookaheadSamples;
-            double delayedSample = currentSample;
-            if (readPos >= 0 && readPos < static_cast<int>(lookaheadBuffer.size()))
-                delayedSample = lookaheadBuffer[readPos];
-
-            writePos = (writePos + 1) % lookaheadSamples;
-
-            // Direct envelope detection (no pre-filtering)
-            const double inputAbs = std::abs(currentSample);
-
-            // Envelope follower with attack/adaptive release
-            if (inputAbs > envelope)
+            for (int ch = 0; ch < numChannels; ++ch)
             {
-                // Attack phase: immediate gain reduction
-                envelope = attackCoeff * envelope + (1.0 - attackCoeff) * inputAbs;
-            }
-            else
-            {
-                // Release phase: fixed 10ms release
-                envelope = releaseCoeff * envelope + (1.0 - releaseCoeff) * inputAbs;
-            }
+                auto* data = buffer.getWritePointer(ch);
+                double& envelope = fastLimiterState[ch].envelope;
+                auto& lookaheadBuffer = fastLimiterState[ch].lookaheadBuffer;
+                int& writePos = fastLimiterState[ch].lookaheadWritePos;
 
-            // Clamp envelope to prevent extreme values
-            envelope = juce::jlimit(0.0, 10.0, envelope);
+                const double currentSample = static_cast<double>(data[i]);
 
-            // Calculate raw gain reduction - hard knee limiting
-            double targetGain = 1.0;
-            if (envelope > thresholdD)
-            {
-                targetGain = thresholdD / envelope;
+                // Store current sample in lookahead buffer
+                if (writePos >= 0 && writePos < static_cast<int>(lookaheadBuffer.size()))
+                    lookaheadBuffer[writePos] = currentSample;
+
+                // Read delayed sample (3ms ago)
+                int readPos = (writePos + 1) % lookaheadSamples;
+                delayedSamples[ch] = currentSample;
+                if (readPos >= 0 && readPos < static_cast<int>(lookaheadBuffer.size()))
+                    delayedSamples[ch] = lookaheadBuffer[readPos];
+
+                writePos = (writePos + 1) % lookaheadSamples;
+
+                const double inputAbs = std::abs(currentSample);
+
+                // Envelope follower
+                if (inputAbs > envelope)
+                    envelope = attackCoeff * envelope + (1.0 - attackCoeff) * inputAbs;
+                else
+                    envelope = releaseCoeff * envelope + (1.0 - releaseCoeff) * inputAbs;
+
+                envelope = juce::jlimit(0.0, 10.0, envelope);
+                channelEnvelope[ch] = envelope;
             }
 
-            // Clamp target gain to prevent artifacts
-            targetGain = juce::jlimit(0.01, 1.0, targetGain);
+            // === PHASE 2: Compute linked envelope ===
+            double maxEnvelope = 0.0;
+            if (isStereo && numChannels >= 2)
+            {
+                maxEnvelope = juce::jmax(channelEnvelope[0], channelEnvelope[1]);
+            }
 
-            // Apply one-pole low-pass filter to gain signal (prevents control signal aliasing)
-            smoothedGain = gainSmoothCoeff * smoothedGain + (1.0 - gainSmoothCoeff) * targetGain;
+            // === PHASE 3: Calculate and apply gain reduction ===
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                auto* data = buffer.getWritePointer(ch);
+                double& smoothedGain = fastLimiterState[ch].smoothedGain;
 
-            const double limitedSample = delayedSample * smoothedGain;
-            data[i] = static_cast<SampleType>(limitedSample);
+                // Blend between channel's own envelope and max envelope
+                double detectionEnvelope = channelEnvelope[ch];
+                if (isStereo && channelLink > 0.0f)
+                {
+                    detectionEnvelope = channelEnvelope[ch] + static_cast<double>(channelLink) * (maxEnvelope - channelEnvelope[ch]);
+                }
+
+                // Calculate gain reduction - hard knee
+                double targetGain = 1.0;
+                if (detectionEnvelope > thresholdD)
+                {
+                    targetGain = thresholdD / detectionEnvelope;
+                }
+                targetGain = juce::jlimit(0.01, 1.0, targetGain);
+
+                // Apply gain smoothing
+                smoothedGain = gainSmoothCoeff * smoothedGain + (1.0 - gainSmoothCoeff) * targetGain;
+
+                const double limitedSample = delayedSamples[ch] * smoothedGain;
+                data[i] = static_cast<SampleType>(limitedSample);
+            }
         }
     }
 }
@@ -2902,50 +3219,7 @@ void QuadBlendDriveAudioProcessor::processOvershootSuppression(juce::AudioBuffer
     if (useOversampling)
         oversamplingPtr->processSamplesDown(block);
 
-    // === OSM MODE 0 CONSTANT LATENCY COMPENSATION ===
-    // Apply delay to match Mode 1 (Advanced TPL) lookahead latency
-    // This ensures the plugin reports constant latency regardless of OSM mode
-    const int osmDelay = advancedTPLLookaheadSamples;
-
-    // Guard against division by zero
-    if (osmDelay <= 0)
-    {
-        // Skip delay compensation - just apply final clamp
-        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
-        {
-            auto* data = buffer.getWritePointer(ch);
-            for (int i = 0; i < buffer.getNumSamples(); ++i)
-            {
-                data[i] = juce::jlimit(static_cast<SampleType>(-ceilingLinear),
-                                       static_cast<SampleType>(ceilingLinear), data[i]);
-            }
-        }
-        return;
-    }
-
-    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
-    {
-        auto* data = buffer.getWritePointer(ch);
-        auto& compensationState = osmCompensationState[ch];
-
-        for (int i = 0; i < buffer.getNumSamples(); ++i)
-        {
-            // Store current sample in delay buffer
-            compensationState.delayBuffer[compensationState.writePos] = static_cast<double>(data[i]);
-
-            // Read delayed sample from buffer
-            int readPos = compensationState.writePos;
-            double delayedSample = compensationState.delayBuffer[readPos];
-
-            // Advance write position (circular buffer)
-            compensationState.writePos = (compensationState.writePos + 1) % osmDelay;
-
-            // Output delayed sample
-            data[i] = static_cast<SampleType>(delayedSample);
-        }
-    }
-
-    // Final safety clamp to ensure true-peak compliance
+    // Final safety clamp to ensure ceiling compliance
     for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
     {
         auto* data = buffer.getWritePointer(ch);
@@ -3455,10 +3729,11 @@ void QuadBlendDriveAudioProcessor::processXYBlend(juce::AudioBuffer<SampleType>&
     fastLimitShaper.setSustainEmphasis(flSustainDB);
 
     // Read mute and solo states
-    bool hcMute = apvts.getRawParameterValue("HC_MUTE")->load() > 0.5f;
-    bool scMute = apvts.getRawParameterValue("SC_MUTE")->load() > 0.5f;
-    bool slMute = apvts.getRawParameterValue("SL_MUTE")->load() > 0.5f;
-    bool flMute = apvts.getRawParameterValue("FL_MUTE")->load() > 0.5f;
+    // Mute takes priority over solo (like an analog console - if it's cut, it's cut)
+    const bool hcMuteParam = apvts.getRawParameterValue("HC_MUTE")->load() > 0.5f;
+    const bool scMuteParam = apvts.getRawParameterValue("SC_MUTE")->load() > 0.5f;
+    const bool slMuteParam = apvts.getRawParameterValue("SL_MUTE")->load() > 0.5f;
+    const bool flMuteParam = apvts.getRawParameterValue("FL_MUTE")->load() > 0.5f;
 
     const bool hcSolo = apvts.getRawParameterValue("HC_SOLO")->load() > 0.5f;
     const bool scSolo = apvts.getRawParameterValue("SC_SOLO")->load() > 0.5f;
@@ -3466,13 +3741,19 @@ void QuadBlendDriveAudioProcessor::processXYBlend(juce::AudioBuffer<SampleType>&
     const bool flSolo = apvts.getRawParameterValue("FL_SOLO")->load() > 0.5f;
 
     // Solo logic: if any processor is soloed, mute all non-soloed processors
+    // BUT explicit mute always takes priority (mute overrides solo)
     const bool anySolo = hcSolo || scSolo || slSolo || flSolo;
+    bool hcMute = hcMuteParam;  // Explicit mute always applies
+    bool scMute = scMuteParam;
+    bool slMute = slMuteParam;
+    bool flMute = flMuteParam;
     if (anySolo)
     {
-        if (!hcSolo) hcMute = true;
-        if (!scSolo) scMute = true;
-        if (!slSolo) slMute = true;
-        if (!flSolo) flMute = true;
+        // Only mute non-soloed processors that aren't already explicitly muted
+        if (!hcSolo && !hcMuteParam) hcMute = true;
+        if (!scSolo && !scMuteParam) scMute = true;
+        if (!slSolo && !slMuteParam) slMute = true;
+        if (!flSolo && !flMuteParam) flMute = true;
     }
 
     const SampleType threshold = juce::Decibels::decibelsToGain(thresholdDB);
@@ -3840,6 +4121,15 @@ void QuadBlendDriveAudioProcessor::recallPreset(int slot)
         param->setValueNotifyingHost(currentOSDelta);
     if (auto* param = apvts.getParameter("TRUE_PEAK_DELTA_MODE"))
         param->setValueNotifyingHost(currentTPDelta);
+}
+
+void QuadBlendDriveAudioProcessor::clearPreset(int slot)
+{
+    if (slot < 0 || slot >= 4)
+        return;
+
+    // Clear the preset by creating an invalid/empty ValueTree
+    presetSlots[slot] = juce::ValueTree();
 }
 
 bool QuadBlendDriveAudioProcessor::hasPreset(int slot) const

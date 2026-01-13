@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="80" height="80" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Rotary Knob Base -->
+  <!-- Outer ring -->
+  <circle cx="40" cy="40" r="38" fill="#2D2D35" stroke="#3C3C41" stroke-width="2"/>
+
+  <!-- Inner gradient -->
+  <defs>
+    <radialGradient id="knobGradient" cx="0.5" cy="0.3">
+      <stop offset="0%" style="stop-color:#3C3C41"/>
+      <stop offset="100%" style="stop-color:#2D2D35"/>
+    </radialGradient>
+  </defs>
+  <circle cx="40" cy="40" r="32" fill="url(#knobGradient)"/>
+
+  <!-- Value indicator line -->
+  <line x1="40" y1="15" x2="40" y2="28" stroke="#4FC3F7" stroke-width="3" stroke-linecap="round"/>
+
+  <!-- Center dot -->
+  <circle cx="40" cy="40" r="4" fill="#1A1A1F"/>
+</svg>
