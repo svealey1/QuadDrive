@@ -2,7 +2,7 @@
 #include "PluginEditor.h"
 
 // Version string - update this single location for all version displays
-static const juce::String kPluginVersion = "1.8.6";
+static const juce::String kPluginVersion = "1.8.7";
 
 //=============================================================================
 
@@ -542,8 +542,8 @@ void XYPad::paint(juce::Graphics& g)
     g.setGradientFill(bgGradient);
     g.fillRoundedRectangle(bounds, 8.0f);
 
-    // === SEGMENTED RING VISUALIZATION ===
-    // Draw a ring that shows processor weighting with color segments
+    // === BLENDED RING VISUALIZATION ===
+    // Single ring with color that blends based on XY position (matches thumb color)
     const float ringRadius = std::min(width, height) * 0.42f;
     const float ringThickness = 3.0f;
     const float pi = juce::MathConstants<float>::pi;
@@ -552,46 +552,85 @@ void XYPad::paint(juce::Graphics& g)
     float xPos = static_cast<float>(xSlider.getValue());
     float yPos = static_cast<float>(ySlider.getValue());
 
-    // Weight calculation: corners get 100%, center gets 25% each
-    // Top-left (0,1) = Hard, Top-right (1,1) = Fast
-    // Bottom-left (0,0) = Soft, Bottom-right (1,0) = Slow
-    float hardWeight = (1.0f - xPos) * yPos;         // Top-left
-    float fastWeight = xPos * yPos;                   // Top-right
-    float softWeight = (1.0f - xPos) * (1.0f - yPos); // Bottom-left
-    float slowWeight = xPos * (1.0f - yPos);          // Bottom-right
+    // Get trim values in dB (-24 to +24) and convert to linear gain for weighting
+    float hcTrimDB = apvts.getRawParameterValue("HC_TRIM")->load();
+    float scTrimDB = apvts.getRawParameterValue("SC_TRIM")->load();
+    float slTrimDB = apvts.getRawParameterValue("SL_TRIM")->load();
+    float flTrimDB = apvts.getRawParameterValue("FL_TRIM")->load();
 
-    // Draw ring segments (each quadrant colored by its processor)
-    auto drawRingSegment = [&](float startAngle, float endAngle, juce::Colour color, float weight, bool muted)
+    // Convert dB to linear gain (higher trim = more contribution to blend)
+    float hcTrimGain = juce::Decibels::decibelsToGain(hcTrimDB);
+    float scTrimGain = juce::Decibels::decibelsToGain(scTrimDB);
+    float slTrimGain = juce::Decibels::decibelsToGain(slTrimDB);
+    float flTrimGain = juce::Decibels::decibelsToGain(flTrimDB);
+
+    // Calculate base corner weights from XY position
+    // Hard (TL): high when X=0, Y=1
+    // Fast (TR): high when X=1, Y=1
+    // Soft (BL): high when X=0, Y=0
+    // Slow (BR): high when X=1, Y=0
+    float hcWeight = (1.0f - xPos) * yPos;        // Top-left
+    float flWeight = xPos * yPos;                  // Top-right
+    float scWeight = (1.0f - xPos) * (1.0f - yPos); // Bottom-left
+    float slWeight = xPos * (1.0f - yPos);         // Bottom-right
+
+    // Apply trim gain as weight multiplier (higher gain = more color contribution)
+    hcWeight *= hcTrimGain;
+    scWeight *= scTrimGain;
+    slWeight *= slTrimGain;
+    flWeight *= flTrimGain;
+
+    // Zero out muted processors completely
+    if (hcMuted) hcWeight = 0.0f;
+    if (scMuted) scWeight = 0.0f;
+    if (slMuted) slWeight = 0.0f;
+    if (flMuted) flWeight = 0.0f;
+
+    // Normalize weights (so they sum to 1)
+    float totalWeight = hcWeight + scWeight + slWeight + flWeight;
+
+    juce::Colour ringColor;
+    if (totalWeight > 0.001f)
     {
-        if (muted)
-            color = color.withSaturation(0.2f).withBrightness(0.3f);  // Desaturated when muted
+        hcWeight /= totalWeight;
+        scWeight /= totalWeight;
+        slWeight /= totalWeight;
+        flWeight /= totalWeight;
 
-        // Base ring segment
-        float alpha = 0.3f + weight * 0.5f;  // More opaque when weighted toward this processor
-        g.setColour(color.withAlpha(alpha));
+        // Blend colors based on normalized weights
+        float r = colors.hardClip.getFloatRed() * hcWeight +
+                  colors.softClip.getFloatRed() * scWeight +
+                  colors.slowLimit.getFloatRed() * slWeight +
+                  colors.fastLimit.getFloatRed() * flWeight;
+        float gr = colors.hardClip.getFloatGreen() * hcWeight +
+                   colors.softClip.getFloatGreen() * scWeight +
+                   colors.slowLimit.getFloatGreen() * slWeight +
+                   colors.fastLimit.getFloatGreen() * flWeight;
+        float b = colors.hardClip.getFloatBlue() * hcWeight +
+                  colors.softClip.getFloatBlue() * scWeight +
+                  colors.slowLimit.getFloatBlue() * slWeight +
+                  colors.fastLimit.getFloatBlue() * flWeight;
 
-        juce::Path segment;
-        segment.addCentredArc(centerX, centerY, ringRadius, ringRadius, 0.0f, startAngle, endAngle, true);
-        g.strokePath(segment, juce::PathStrokeType(ringThickness, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-    };
+        ringColor = juce::Colour::fromFloatRGBA(r, gr, b, 1.0f);
+    }
+    else
+    {
+        // All processors muted - show dim grey
+        ringColor = juce::Colour(80, 80, 85);
+    }
 
-    // Draw 4 quadrant segments (angles in radians, 0 = right, going clockwise)
-    // Rotated 45° to align with corners instead of edges
-    // Hard (top-left corner): -180° to -90° (-π to -π/2)
-    drawRingSegment(-pi, -pi * 0.5f, colors.hardClip, hardWeight, hcMuted);
-    // Fast (top-right corner): -90° to 0° (-π/2 to 0)
-    drawRingSegment(-pi * 0.5f, 0.0f, colors.fastLimit, fastWeight, flMuted);
-    // Slow (bottom-right corner): 0° to 90° (0 to π/2)
-    drawRingSegment(0.0f, pi * 0.5f, colors.slowLimit, slowWeight, slMuted);
-    // Soft (bottom-left corner): 90° to 180° (π/2 to π)
-    drawRingSegment(pi * 0.5f, pi, colors.softClip, softWeight, scMuted);
+    // Draw the unified ring
+    juce::Path ringPath;
+    ringPath.addCentredArc(centerX, centerY, ringRadius, ringRadius, 0.0f, 0.0f, pi * 2.0f, true);
+    g.setColour(ringColor.withAlpha(0.7f));
+    g.strokePath(ringPath, juce::PathStrokeType(ringThickness, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
     // === GR-DRIVEN CENTER GLOW ===
     // Radial gradient from center that pulses with total GR
     float glowIntensity = juce::jmap(totalGR, 0.0f, 12.0f, 0.15f, 0.6f);
     glowIntensity = juce::jlimit(0.15f, 0.6f, glowIntensity);
 
-    juce::ColourGradient centerGlow(juce::Colour(255, 140, 60).withAlpha(glowIntensity), centerX, centerY,
+    juce::ColourGradient centerGlow(ringColor.withAlpha(glowIntensity), centerX, centerY,
                                      juce::Colours::transparentBlack, centerX, centerY + ringRadius * 0.6f, true);
     g.setGradientFill(centerGlow);
     g.fillEllipse(centerX - ringRadius * 0.6f, centerY - ringRadius * 0.6f, ringRadius * 1.2f, ringRadius * 1.2f);
@@ -601,10 +640,23 @@ void XYPad::paint(juce::Graphics& g)
     const float cornerOffset = 18.0f;
     const float indicatorSize = 8.0f;
 
-    auto drawCornerIndicator = [&](float cx, float cy, juce::Colour color, float gr, bool muted)
+    // trimGain: 1.0 at 0dB, higher for positive trim, lower for negative
+    // More aggressive mapping so small boosts (1-6dB) are clearly visible
+    auto trimToAlphaMultiplier = [](float trimGain) {
+        // At 0dB (gain=1.0): multiplier = 1.0
+        // At +6dB (gain=2.0): multiplier ≈ 1.6
+        // At +12dB (gain=4.0): multiplier ≈ 2.5
+        // At -12dB (gain=0.25): multiplier ≈ 0.4
+        // At -24dB (gain=0.06): multiplier ≈ 0.15
+        float multiplier = std::pow(trimGain, 0.7f);  // Exponent < 1.0 = more sensitive to small changes
+        return juce::jlimit(0.15f, 2.5f, multiplier);
+    };
+
+    auto drawCornerIndicator = [&](float cx, float cy, juce::Colour color, float gr, bool muted, float trimGain)
     {
-        float alpha = muted ? 0.15f : (0.4f + juce::jmap(gr, 0.0f, 6.0f, 0.0f, 0.5f));
-        alpha = juce::jlimit(0.15f, 0.9f, alpha);
+        float trimAlpha = trimToAlphaMultiplier(trimGain);
+        float alpha = muted ? 0.15f : (0.3f + 0.6f * trimAlpha);  // Base 0.3, scale up to 1.8 with max trim
+        alpha = juce::jlimit(0.15f, 1.0f, alpha);
 
         // Glow
         if (!muted && gr > 0.1f)
@@ -619,33 +671,35 @@ void XYPad::paint(juce::Graphics& g)
     };
 
     // Corner positions: Hard (TL), Fast (TR), Soft (BL), Slow (BR)
-    drawCornerIndicator(cornerOffset, cornerOffset, colors.hardClip, hcGR, hcMuted);
-    drawCornerIndicator(width - cornerOffset, cornerOffset, colors.fastLimit, flGR, flMuted);
-    drawCornerIndicator(cornerOffset, height - cornerOffset, colors.softClip, scGR, scMuted);
-    drawCornerIndicator(width - cornerOffset, height - cornerOffset, colors.slowLimit, slGR, slMuted);
+    drawCornerIndicator(cornerOffset, cornerOffset, colors.hardClip, hcGR, hcMuted, hcTrimGain);
+    drawCornerIndicator(width - cornerOffset, cornerOffset, colors.fastLimit, flGR, flMuted, flTrimGain);
+    drawCornerIndicator(cornerOffset, height - cornerOffset, colors.softClip, scGR, scMuted, scTrimGain);
+    drawCornerIndicator(width - cornerOffset, height - cornerOffset, colors.slowLimit, slGR, slMuted, slTrimGain);
 
     // === CORNER LABELS ===
     g.setFont(juce::FontOptions(9.5f));
 
-    auto drawCornerLabel = [&](float lx, float ly, const juce::String& text, juce::Colour color, bool muted, juce::Justification just)
+    auto drawCornerLabel = [&](float lx, float ly, const juce::String& text, juce::Colour color, bool muted, float trimGain, juce::Justification just)
     {
-        g.setColour(muted ? juce::Colours::grey.withAlpha(0.4f) : color.withAlpha(0.7f));
+        float trimAlpha = trimToAlphaMultiplier(trimGain);
+        float alpha = muted ? 0.4f : 0.35f + 0.55f * trimAlpha;  // Base 0.35, scale up with trim
+        alpha = juce::jlimit(0.25f, 1.0f, alpha);
+        g.setColour(muted ? juce::Colours::grey.withAlpha(0.4f) : color.withAlpha(alpha));
         juce::Rectangle<float> labelArea(lx, ly, 40, 14);
         g.drawText(text, labelArea, just);
     };
 
-    drawCornerLabel(cornerOffset + 12, cornerOffset - 3, "HARD", colors.hardClip, hcMuted, juce::Justification::centredLeft);
-    drawCornerLabel(width - cornerOffset - 52, cornerOffset - 3, "FAST", colors.fastLimit, flMuted, juce::Justification::centredRight);
-    drawCornerLabel(cornerOffset + 12, height - cornerOffset - 11, "SOFT", colors.softClip, scMuted, juce::Justification::centredLeft);
-    drawCornerLabel(width - cornerOffset - 52, height - cornerOffset - 11, "SLOW", colors.slowLimit, slMuted, juce::Justification::centredRight);
+    drawCornerLabel(cornerOffset + 12, cornerOffset - 3, "HARD", colors.hardClip, hcMuted, hcTrimGain, juce::Justification::centredLeft);
+    drawCornerLabel(width - cornerOffset - 52, cornerOffset - 3, "FAST", colors.fastLimit, flMuted, flTrimGain, juce::Justification::centredRight);
+    drawCornerLabel(cornerOffset + 12, height - cornerOffset - 11, "SOFT", colors.softClip, scMuted, scTrimGain, juce::Justification::centredLeft);
+    drawCornerLabel(width - cornerOffset - 52, height - cornerOffset - 11, "SLOW", colors.slowLimit, slMuted, slTrimGain, juce::Justification::centredRight);
 
     // === THUMB/DOT ===
     float thumbX = bounds.getX() + xPos * width;
     float thumbY = bounds.getY() + (1.0f - yPos) * height;
 
-    // Calculate blended thumb color based on position weights
-    juce::Colour thumbColor = colors.hardClip.interpolatedWith(colors.fastLimit, xPos)
-                                 .interpolatedWith(colors.softClip.interpolatedWith(colors.slowLimit, xPos), 1.0f - yPos);
+    // Use the same blended color for thumb (accounts for mutes and trims)
+    juce::Colour thumbColor = ringColor;
 
     // Outer glow (processor-colored)
     g.setColour(thumbColor.withAlpha(0.25f));
@@ -847,8 +901,22 @@ CalibrationPanel::CalibrationPanel(juce::AudioProcessorValueTreeState& apvts, Qu
     calibLevelAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "CALIB_LEVEL", calibLevelSlider);
 
+    // Start timer to update colors
+    startTimerHz(15);
+
     // Start collapsed
     setVisible(false);
+}
+
+CalibrationPanel::~CalibrationPanel()
+{
+    stopTimer();
+}
+
+void CalibrationPanel::timerCallback()
+{
+    // Update calibration slider color to match accent
+    calibLevelSlider.setColour(juce::Slider::thumbColourId, processor.processorColors.accent);
 }
 
 void CalibrationPanel::paint(juce::Graphics& g)
@@ -927,12 +995,12 @@ AdvancedPanel::AdvancedPanel(juce::AudioProcessorValueTreeState& apvts, QuadBlen
     // Configure section labels
     softClipLabel.setText("SOFT CLIP", juce::dontSendNotification);
     softClipLabel.setFont(juce::Font(10.0f, juce::Font::bold));
-    softClipLabel.setColour(juce::Label::textColourId, juce::Colour(180, 180, 190));
+    softClipLabel.setColour(juce::Label::textColourId, juce::Colour(255, 150, 60));  // Orange for Soft Clip
     addAndMakeVisible(softClipLabel);
 
     limitersLabel.setText("SLOW LIMITER", juce::dontSendNotification);
     limitersLabel.setFont(juce::Font(10.0f, juce::Font::bold));
-    limitersLabel.setColour(juce::Label::textColourId, juce::Colour(180, 180, 190));
+    limitersLabel.setColour(juce::Label::textColourId, juce::Colour(255, 220, 100));  // Yellow for Slow Limit
     addAndMakeVisible(limitersLabel);
 
     compLabel.setText("GAIN COMPENSATION", juce::dontSendNotification);
@@ -973,11 +1041,24 @@ AdvancedPanel::AdvancedPanel(juce::AudioProcessorValueTreeState& apvts, QuadBlen
     flLimitAttackSlider.setSliderStyle(juce::Slider::LinearHorizontal);
     flLimitAttackSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 22);
     addAndMakeVisible(flLimitAttackSlider);
-    flLimitAttackLabel.setText("FL Attack Time:", juce::dontSendNotification);
-    flLimitAttackLabel.setFont(juce::Font(10.0f));
-    flLimitAttackLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.8f));
+    flLimitAttackLabel.setText("FAST LIMITER", juce::dontSendNotification);
+    flLimitAttackLabel.setFont(juce::Font(10.0f, juce::Font::bold));
+    flLimitAttackLabel.setColour(juce::Label::textColourId, juce::Colour(80, 160, 255));  // Blue for Fast Limit
     addAndMakeVisible(flLimitAttackLabel);
+    flLimitAttackTimeLabel.setText("Attack:", juce::dontSendNotification);
+    flLimitAttackTimeLabel.setFont(juce::Font(10.0f));
+    flLimitAttackTimeLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.8f));
+    addAndMakeVisible(flLimitAttackTimeLabel);
     flLimitAttackAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "FL_LIMIT_ATTACK", flLimitAttackSlider);
+
+    flLimitReleaseSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    flLimitReleaseSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 22);
+    addAndMakeVisible(flLimitReleaseSlider);
+    flLimitReleaseLabel.setText("Release:", juce::dontSendNotification);
+    flLimitReleaseLabel.setFont(juce::Font(10.0f));
+    flLimitReleaseLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.8f));
+    addAndMakeVisible(flLimitReleaseLabel);
+    flLimitReleaseAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "FL_LIMIT_RELEASE", flLimitReleaseSlider);
 
     // Gain Compensation controls
     hcCompButton.setButtonText("Hard");
@@ -1001,7 +1082,7 @@ AdvancedPanel::AdvancedPanel(juce::AudioProcessorValueTreeState& apvts, QuadBlen
     flCompAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(apvts, "FL_COMP", flCompButton);
 
     // === ENVELOPE SHAPING CONTROLS ===
-    envelopeLabel.setText("ENVELOPE SHAPING (TRANSIENT/SUSTAIN)", juce::dontSendNotification);
+    envelopeLabel.setText("ENVELOPE SHAPING (PUNCH / SUSTAIN EMPHASIS)", juce::dontSendNotification);
     envelopeLabel.setFont(juce::Font(10.0f, juce::Font::bold));
     envelopeLabel.setColour(juce::Label::textColourId, juce::Colour(180, 180, 190));
     addAndMakeVisible(envelopeLabel);
@@ -1020,27 +1101,27 @@ AdvancedPanel::AdvancedPanel(juce::AudioProcessorValueTreeState& apvts, QuadBlen
         addAndMakeVisible(label);
     };
 
-    // Hard Clip
-    setupEnvelopeSlider(hcAttackSlider, hcAttackLabel, "HC ATK");
-    setupEnvelopeSlider(hcSustainSlider, hcSustainLabel, "HC SUS");
+    // Hard Clip - Punch/Sustain emphasis
+    setupEnvelopeSlider(hcAttackSlider, hcAttackLabel, "HARD CLIP");
+    setupEnvelopeSlider(hcSustainSlider, hcSustainLabel, "Sustain");
     hcAttackAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "HC_ATTACK", hcAttackSlider);
     hcSustainAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "HC_SUSTAIN", hcSustainSlider);
 
-    // Soft Clip
-    setupEnvelopeSlider(scAttackSlider, scAttackLabel, "SC ATK");
-    setupEnvelopeSlider(scSustainSlider, scSustainLabel, "SC SUS");
+    // Soft Clip - Punch/Sustain emphasis
+    setupEnvelopeSlider(scAttackSlider, scAttackLabel, "SOFT CLIP");
+    setupEnvelopeSlider(scSustainSlider, scSustainLabel, "Sustain");
     scAttackAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "SC_ATTACK", scAttackSlider);
     scSustainAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "SC_SUSTAIN", scSustainSlider);
 
-    // Slow Limit
-    setupEnvelopeSlider(slAttackSlider, slAttackLabel, "SL ATK");
-    setupEnvelopeSlider(slSustainSlider, slSustainLabel, "SL SUS");
+    // Slow Limit - Punch/Sustain emphasis
+    setupEnvelopeSlider(slAttackSlider, slAttackLabel, "SLOW LIMIT");
+    setupEnvelopeSlider(slSustainSlider, slSustainLabel, "Sustain");
     slAttackAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "SL_ATTACK", slAttackSlider);
     slSustainAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "SL_SUSTAIN", slSustainSlider);
 
-    // Fast Limit
-    setupEnvelopeSlider(flAttackSlider, flAttackLabel, "FL ATK");
-    setupEnvelopeSlider(flSustainSlider, flSustainLabel, "FL SUS");
+    // Fast Limit - Punch/Sustain emphasis
+    setupEnvelopeSlider(flAttackSlider, flAttackLabel, "FAST LIMIT");
+    setupEnvelopeSlider(flSustainSlider, flSustainLabel, "Sustain");
     flAttackAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "FL_ATTACK", flAttackSlider);
     flSustainAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "FL_SUSTAIN", flSustainSlider);
 
@@ -1064,125 +1145,103 @@ void AdvancedPanel::paint(juce::Graphics& g)
 
 void AdvancedPanel::resized()
 {
-    auto bounds = getLocalBounds().reduced(12);
+    auto bounds = getLocalBounds().reduced(15);
+    const int panelWidth = bounds.getWidth();
+    const int panelHeight = bounds.getHeight();
 
-    // Use two-column layout with better spacing
-    const int columnGap = 15;
-    const int halfWidth = (bounds.getWidth() - columnGap) / 2;
-    auto leftColumn = bounds.removeFromLeft(halfWidth);
-    bounds.removeFromLeft(columnGap);
-    auto rightColumn = bounds;
+    const int headerHeight = 18;
+    const int sliderRowHeight = 24;
+    const int knobSize = 42;
+    const int knobWithText = knobSize + 22;
+    const int sectionGap = 15;
 
-    const int rowHeight = 22;
-    const int sectionGap = 10;
-    const int headerHeight = 16;
-    const int labelWidth = 95;
-    const int sliderWidth = 150;
+    int y = bounds.getY();
 
-    // ========== LEFT COLUMN ==========
-    int yPosLeft = 0;
+    // ========== ROW 1: SOFT CLIP | SLOW LIMITER | FAST LIMITER ==========
+    // Three columns for processor-specific settings
+    const int colGap = 20;
+    const int colWidth = (panelWidth - colGap * 2) / 3;
+    const int col1 = bounds.getX();
+    const int col2 = col1 + colWidth + colGap;
+    const int col3 = col2 + colWidth + colGap;
+    const int labelW = 55;
+    const int sliderW = colWidth - labelW - 5;
 
-    // === SOFT CLIP SECTION ===
-    softClipLabel.setBounds(leftColumn.getX(), yPosLeft, leftColumn.getWidth(), headerHeight);
-    yPosLeft += headerHeight + 8;
+    // SOFT CLIP column
+    softClipLabel.setBounds(col1, y, colWidth, headerHeight);
+    scKneeLabel.setBounds(col1, y + headerHeight + 4, labelW, sliderRowHeight);
+    scKneeSlider.setBounds(col1 + labelW, y + headerHeight + 4, sliderW, sliderRowHeight);
 
-    scKneeLabel.setBounds(leftColumn.getX(), yPosLeft, labelWidth, rowHeight);
-    scKneeSlider.setBounds(leftColumn.getX() + labelWidth, yPosLeft, sliderWidth, rowHeight);
-    yPosLeft += rowHeight + sectionGap;
+    // SLOW LIMITER column
+    limitersLabel.setBounds(col2, y, colWidth, headerHeight);
+    slLimitAttackLabel.setBounds(col2, y + headerHeight + 4, labelW, sliderRowHeight);
+    slLimitAttackSlider.setBounds(col2 + labelW, y + headerHeight + 4, sliderW, sliderRowHeight);
+    limitRelLabel.setBounds(col2, y + headerHeight + 4 + sliderRowHeight + 2, labelW, sliderRowHeight);
+    limitRelSlider.setBounds(col2 + labelW, y + headerHeight + 4 + sliderRowHeight + 2, sliderW, sliderRowHeight);
 
-    // === LIMITERS SECTION ===
-    limitersLabel.setBounds(leftColumn.getX(), yPosLeft, leftColumn.getWidth(), headerHeight);
-    yPosLeft += headerHeight + 8;
+    // FAST LIMITER column
+    flLimitAttackLabel.setBounds(col3, y, colWidth, headerHeight);
+    flLimitAttackTimeLabel.setBounds(col3, y + headerHeight + 4, labelW, sliderRowHeight);
+    flLimitAttackSlider.setBounds(col3 + labelW, y + headerHeight + 4, sliderW, sliderRowHeight);
+    flLimitReleaseLabel.setBounds(col3, y + headerHeight + 4 + sliderRowHeight + 2, labelW, sliderRowHeight);
+    flLimitReleaseSlider.setBounds(col3 + labelW, y + headerHeight + 4 + sliderRowHeight + 2, sliderW, sliderRowHeight);
 
-    limitRelLabel.setBounds(leftColumn.getX(), yPosLeft, labelWidth, rowHeight);
-    limitRelSlider.setBounds(leftColumn.getX() + labelWidth, yPosLeft, sliderWidth, rowHeight);
-    yPosLeft += rowHeight + 4;
+    y += headerHeight + 4 + sliderRowHeight * 2 + 2 + sectionGap;
 
-    slLimitAttackLabel.setBounds(leftColumn.getX(), yPosLeft, labelWidth, rowHeight);
-    slLimitAttackSlider.setBounds(leftColumn.getX() + labelWidth, yPosLeft, sliderWidth, rowHeight);
-    yPosLeft += rowHeight + 4;
+    // ========== ROW 2: ENVELOPE SHAPING (4 across) ==========
+    envelopeLabel.setBounds(bounds.getX(), y, panelWidth, headerHeight);
+    y += headerHeight + 6;
 
-    flLimitAttackLabel.setBounds(leftColumn.getX(), yPosLeft, labelWidth, rowHeight);
-    flLimitAttackSlider.setBounds(leftColumn.getX() + labelWidth, yPosLeft, sliderWidth, rowHeight);
-    yPosLeft += rowHeight + sectionGap;
+    // Four columns for envelope knob pairs
+    // Each column: Header (processor name), then two knobs (Punch | Sustain) with small labels
+    const int envColGap = 8;
+    const int envColWidth = (panelWidth - envColGap * 3) / 4;
+    const int subLabelHeight = 12;
 
-    // === GAIN COMPENSATION SECTION ===
-    compLabel.setBounds(leftColumn.getX(), yPosLeft, leftColumn.getWidth(), headerHeight);
-    yPosLeft += headerHeight + 8;
+    auto layoutEnvKnobs = [&](int x, juce::Label& headerLabel, juce::Slider& punchKnob, juce::Slider& susKnob, juce::Label& susLabel) {
+        // Header (processor name)
+        headerLabel.setBounds(x, y, envColWidth, 14);
 
-    // Vertical 2x2 grid for better clarity
-    const int compButtonWidth = 55;
-    const int compButtonHeight = 22;
-    const int compGap = 6;
+        // Position knobs side by side with small labels underneath header
+        int knobX = x + (envColWidth - (knobSize * 2 + 8)) / 2;
 
-    // Top row: HC and SC
-    int xPosComp = leftColumn.getX();
-    hcCompButton.setBounds(xPosComp, yPosLeft, compButtonWidth, compButtonHeight);
-    xPosComp += compButtonWidth + compGap;
-    scCompButton.setBounds(xPosComp, yPosLeft, compButtonWidth, compButtonHeight);
+        // "Punch" and "Sustain" sub-labels
+        susLabel.setText("Punch      Sustain", juce::dontSendNotification);
+        susLabel.setFont(juce::Font(8.0f));
+        susLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.5f));
+        susLabel.setJustificationType(juce::Justification::centred);
+        susLabel.setBounds(x, y + 14, envColWidth, subLabelHeight);
 
-    yPosLeft += compButtonHeight + compGap;
+        // Knobs below the sub-labels
+        punchKnob.setBounds(knobX, y + 14 + subLabelHeight, knobSize, knobWithText);
+        susKnob.setBounds(knobX + knobSize + 8, y + 14 + subLabelHeight, knobSize, knobWithText);
+    };
 
-    // Bottom row: SL and FL
-    xPosComp = leftColumn.getX();
-    slCompButton.setBounds(xPosComp, yPosLeft, compButtonWidth, compButtonHeight);
-    xPosComp += compButtonWidth + compGap;
-    flCompButton.setBounds(xPosComp, yPosLeft, compButtonWidth, compButtonHeight);
+    int ex = bounds.getX();
+    layoutEnvKnobs(ex, hcAttackLabel, hcAttackSlider, hcSustainSlider, hcSustainLabel);
+    ex += envColWidth + envColGap;
+    layoutEnvKnobs(ex, flAttackLabel, flAttackSlider, flSustainSlider, flSustainLabel);
+    ex += envColWidth + envColGap;
+    layoutEnvKnobs(ex, scAttackLabel, scAttackSlider, scSustainSlider, scSustainLabel);
+    ex += envColWidth + envColGap;
+    layoutEnvKnobs(ex, slAttackLabel, slAttackSlider, slSustainSlider, slSustainLabel);
 
-    // ========== RIGHT COLUMN - ENVELOPE SHAPING ==========
-    int yPosRight = 0;
+    y += 14 + subLabelHeight + knobWithText + sectionGap;
 
-    envelopeLabel.setBounds(rightColumn.getX(), yPosRight, rightColumn.getWidth(), headerHeight);
-    yPosRight += headerHeight + 8;
+    // ========== ROW 3: GAIN COMPENSATION ==========
+    const int compBtnW = 60;
+    const int compBtnH = 24;
+    const int compGap = 10;
 
-    // Envelope layout in 2x2 grid matching XY pad layout:
-    // Row 1: HC (top-left) | FL (top-right)
-    // Row 2: SC (bottom-left) | SL (bottom-right)
-    const int knobSize = 36;
-    const int knobSpacing = 8;
-    const int envLabelWidth = 30;
-    const int labelToKnobGap = 5;
-    const int envColumnGap = 12;
-    const int rowGap = 10;
-
-    const int envHalfWidth = (rightColumn.getWidth() - envColumnGap) / 2;
-
-    // Row 1: HC (left) and FL (right)
-    int currentY = yPosRight;
-
-    // HC (Top-Left)
-    int xPosEnv = rightColumn.getX();
-    hcAttackLabel.setBounds(xPosEnv, currentY, envLabelWidth, 14);
-    hcAttackSlider.setBounds(xPosEnv + envLabelWidth + labelToKnobGap, currentY, knobSize, knobSize + 16);
-    hcSustainSlider.setBounds(xPosEnv + envLabelWidth + labelToKnobGap + knobSize + knobSpacing, currentY, knobSize, knobSize + 16);
-
-    // FL (Top-Right)
-    xPosEnv = rightColumn.getX() + envHalfWidth + envColumnGap;
-    flAttackLabel.setBounds(xPosEnv, currentY, envLabelWidth, 14);
-    flAttackSlider.setBounds(xPosEnv + envLabelWidth + labelToKnobGap, currentY, knobSize, knobSize + 16);
-    flSustainSlider.setBounds(xPosEnv + envLabelWidth + labelToKnobGap + knobSize + knobSpacing, currentY, knobSize, knobSize + 16);
-
-    currentY += knobSize + 16 + rowGap;
-
-    // Row 2: SC (left) and SL (right)
-
-    // SC (Bottom-Left)
-    xPosEnv = rightColumn.getX();
-    scAttackLabel.setBounds(xPosEnv, currentY, envLabelWidth, 14);
-    scAttackSlider.setBounds(xPosEnv + envLabelWidth + labelToKnobGap, currentY, knobSize, knobSize + 16);
-    scSustainSlider.setBounds(xPosEnv + envLabelWidth + labelToKnobGap + knobSize + knobSpacing, currentY, knobSize, knobSize + 16);
-
-    // SL (Bottom-Right)
-    xPosEnv = rightColumn.getX() + envHalfWidth + envColumnGap;
-    slAttackLabel.setBounds(xPosEnv, currentY, envLabelWidth, 14);
-    slAttackSlider.setBounds(xPosEnv + envLabelWidth + labelToKnobGap, currentY, knobSize, knobSize + 16);
-    slSustainSlider.setBounds(xPosEnv + envLabelWidth + labelToKnobGap + knobSize + knobSpacing, currentY, knobSize, knobSize + 16);
-
-    // Hide sustain labels (using attack label for both columns)
-    hcSustainLabel.setBounds(0, 0, 0, 0);
-    scSustainLabel.setBounds(0, 0, 0, 0);
-    slSustainLabel.setBounds(0, 0, 0, 0);
-    flSustainLabel.setBounds(0, 0, 0, 0);
+    compLabel.setBounds(bounds.getX(), y, 140, headerHeight);
+    int cx = bounds.getX() + 150;
+    hcCompButton.setBounds(cx, y - 3, compBtnW, compBtnH);
+    cx += compBtnW + compGap;
+    scCompButton.setBounds(cx, y - 3, compBtnW, compBtnH);
+    cx += compBtnW + compGap;
+    slCompButton.setBounds(cx, y - 3, compBtnW, compBtnH);
+    cx += compBtnW + compGap;
+    flCompButton.setBounds(cx, y - 3, compBtnW, compBtnH);
 }
 
 void AdvancedPanel::setVisible(bool shouldBeVisible)
@@ -1206,6 +1265,12 @@ void AdvancedPanel::timerCallback()
     slSustainSlider.setColour(juce::Slider::thumbColourId, processor.processorColors.slowLimit);
     flAttackSlider.setColour(juce::Slider::thumbColourId, processor.processorColors.fastLimit);
     flSustainSlider.setColour(juce::Slider::thumbColourId, processor.processorColors.fastLimit);
+
+    // Update horizontal sliders with accent color
+    scKneeSlider.setColour(juce::Slider::thumbColourId, processor.processorColors.accent);
+    limitRelSlider.setColour(juce::Slider::thumbColourId, processor.processorColors.accent);
+    slLimitAttackSlider.setColour(juce::Slider::thumbColourId, processor.processorColors.accent);
+    flLimitAttackSlider.setColour(juce::Slider::thumbColourId, processor.processorColors.accent);
 
     // Update comp button text colors to match processor colors
     hcCompButton.setColour(juce::ToggleButton::textColourId, processor.processorColors.hardClip);
@@ -1345,9 +1410,9 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     // Apply custom look and feel
     setLookAndFeel(&lookAndFeel);
 
-    setSize(950, 600);  // Default size - compact, scope/advanced panels expand below
+    setSize(1000, 610);  // Default size - compact, scope/advanced panels expand below
     setResizable(true, true);
-    setResizeLimits(800, 600, 1900, 1200);  // Min 800x600, Max with panels expanded
+    setResizeLimits(800, 610, 1900, 1200);  // Min 800x610, Max with panels expanded
 
     // Setup XY Pad
     addAndMakeVisible(xyPad);
@@ -1606,7 +1671,7 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     helpButton.onClick = [this]()
     {
         juce::PopupMenu helpMenu;
-        helpMenu.addSectionHeader("Bongo Juice - Quick Reference");
+        helpMenu.addSectionHeader("Emulsion - Quick Reference");
         helpMenu.addSeparator();
 
         // XY Pad section
@@ -1707,7 +1772,7 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     scopeToggleButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.6f));
     scopeToggleButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
     scopeToggleButton.onClick = [this]() {
-        const int baseHeight = 600;
+        const int baseHeight = 610;
         const int scopeHeight = 300;  // Height added for scope
 
         if (scopeToggleButton.getToggleState())
@@ -1737,8 +1802,8 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     advancedToggleButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.6f));
     advancedToggleButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
     advancedToggleButton.onClick = [this]() {
-        const int baseHeight = 600;
-        const int advancedHeight = 350;  // Height added for advanced panel
+        const int baseHeight = 610;
+        const int advancedHeight = 290;  // Height to fit panel snugly (280 scaled + padding)
 
         if (advancedToggleButton.getToggleState())
         {
@@ -1768,7 +1833,7 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
 
         label.setText(text, juce::dontSendNotification);
         label.setJustificationType(juce::Justification::centredLeft);
-        label.setFont(juce::Font(12.0f));
+        label.setFont(juce::Font(14.0f));  // Larger font to match button text
         // Don't attach - we'll position manually
         addAndMakeVisible(label);
     };
@@ -1778,7 +1843,7 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     setupRotarySlider(mixSlider, mixLabel, "Mix");
 
     // Threshold Control (Calib moved to CalibrationPanel)
-    setupRotarySlider(thresholdSlider, thresholdLabel, "Thresh");
+    setupRotarySlider(thresholdSlider, thresholdLabel, "Threshold");
 
     // CAL Button - Links threshold to calibration level (auto-tracking)
     thresholdLinkButton.setButtonText("CAL");
@@ -1838,14 +1903,14 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
 
         label.setText(text, juce::dontSendNotification);
         label.setJustificationType(juce::Justification::centredLeft);
-        label.setFont(juce::Font(11.0f));
+        label.setFont(juce::Font(14.0f));  // Larger font to match button text
         addAndMakeVisible(label);
     };
 
-    setupTrimSlider(hcTrimSlider, hcTrimLabel, "Hard", 0);
-    setupTrimSlider(scTrimSlider, scTrimLabel, "Soft", 1);
-    setupTrimSlider(slTrimSlider, slTrimLabel, "Slow", 2);
-    setupTrimSlider(flTrimSlider, flTrimLabel, "Fast", 3);
+    setupTrimSlider(hcTrimSlider, hcTrimLabel, "Hard Clip", 0);
+    setupTrimSlider(scTrimSlider, scTrimLabel, "Soft Clip", 1);
+    setupTrimSlider(slTrimSlider, slTrimLabel, "Slow Limit", 2);
+    setupTrimSlider(flTrimSlider, flTrimLabel, "Fast Limit", 3);
 
     // Setup Delta Mode Controls - Consistent button styling
     deltaModeButton.setButtonText("DELTA MODE");
@@ -1884,15 +1949,14 @@ QuadBlendDriveAudioProcessorEditor::QuadBlendDriveAudioProcessorEditor(QuadBlend
     bypassButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
     addAndMakeVisible(bypassButton);
 
-    // Setup Master Gain Compensation Toggle - Hidden but functional (always enabled)
+    // Setup Master Gain Compensation Toggle - Enables per-processor compensation
     masterCompButton.setButtonText("GAIN COMP");
     masterCompButton.setClickingTogglesState(true);
     masterCompButton.setColour(juce::TextButton::buttonColourId, juce::Colour(35, 35, 40));
     masterCompButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(80, 220, 120));
-    masterCompButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.85f));
+    masterCompButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.6f));
     masterCompButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
-    addChildComponent(masterCompButton);
-    masterCompButton.setVisible(false);  // Hidden - always enabled
+    addAndMakeVisible(masterCompButton);
 
     // Setup Toggle Buttons for Muting - Modern styling
     auto setupMuteButton = [](juce::ToggleButton& button)
@@ -2312,8 +2376,15 @@ void QuadBlendDriveAudioProcessorEditor::updateABCDButtonStates()
 
 void QuadBlendDriveAudioProcessorEditor::paint(juce::Graphics& g)
 {
-    const float scale = getWidth() / 1120.0f;
+    const float scale = getWidth() / 1050.0f;
     const int toolbarHeight = static_cast<int>(28 * scale);
+    const int titleAreaHeight = static_cast<int>(70 * scale);
+    const int padding = static_cast<int>(20 * scale);
+
+    // Calculate XY pad top position (same logic as resized())
+    // XY pad starts at: toolbarHeight + titleAreaHeight + padding + yOffset
+    // For centering title, we use the area between toolbar and XY pad top
+    const int xyPadTopY = xyPad.getY();
 
     // Modern gradient background
     juce::ColourGradient bgGradient(juce::Colour(16, 16, 20), 0, 0,
@@ -2332,26 +2403,28 @@ void QuadBlendDriveAudioProcessorEditor::paint(juce::Graphics& g)
     g.drawLine(0, static_cast<float>(toolbarHeight - 1),
                static_cast<float>(getWidth()), static_cast<float>(toolbarHeight - 1), 1.0f);
 
-    // ========== TITLE (below toolbar) ==========
-    const int titleY = toolbarHeight;
+    // ========== TITLE (centered between toolbar and XY pad) ==========
+    const int titleFontHeight = static_cast<int>(42 * scale);
+    const int availableSpace = xyPadTopY - toolbarHeight;
+    const int titleY = toolbarHeight + (availableSpace - titleFontHeight) / 2;
 
     // Shadow/glow effect
     g.setColour(juce::Colour(255, 120, 50).withAlpha(0.15f));
     g.setFont(juce::Font(42.0f * scale, juce::Font::bold));
-    g.drawText("Bongo Juice", 0, titleY + static_cast<int>(6 * scale), getWidth(),
-               static_cast<int>(50 * scale), juce::Justification::centred);
+    g.drawText("Emulsion", 0, titleY + 1, getWidth(),
+               titleFontHeight, juce::Justification::centred);
 
     // Main title
     g.setColour(juce::Colours::white.withAlpha(0.95f));
     g.setFont(juce::Font(42.0f * scale, juce::Font::plain));
-    g.drawText("Bongo Juice", 0, titleY + static_cast<int>(5 * scale), getWidth(),
-               static_cast<int>(50 * scale), juce::Justification::centred);
+    g.drawText("Emulsion", 0, titleY, getWidth(),
+               titleFontHeight, juce::Justification::centred);
 }
 
 void QuadBlendDriveAudioProcessorEditor::resized()
 {
     auto bounds = getLocalBounds();
-    const float scale = getWidth() / 1120.0f;  // Scale factor based on default width
+    const float scale = getWidth() / 1050.0f;  // Scale factor based on default width
 
     // ========== TOOLBAR AREA (TOP) ==========
     const int toolbarHeight = static_cast<int>(28 * scale);
@@ -2434,9 +2507,9 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     const int spacing = static_cast<int>(10 * scale);
 
     // === PANEL EXPANSION LOGIC ===
-    // Base content height is 600px minus toolbar and title
+    // Base content height is 610px minus toolbar and title
     // Scope and Advanced panels expand BELOW this baseline
-    const int baseHeight = static_cast<int>(600 * scale);
+    const int baseHeight = static_cast<int>(610 * scale);
     const int titleHeight = static_cast<int>(70 * scale);
     const int mainContentHeight = baseHeight - toolbarHeight - titleHeight;
     const int advancedHeight = static_cast<int>(180 * scale);
@@ -2445,14 +2518,9 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     juce::Rectangle<int> mainContentBounds = bounds;
     mainContentBounds.setHeight(mainContentHeight);
 
-    // Scope and Advanced panels go below the base 600px line
+    // Scope area calculated after button positioning (see below)
+    // We'll set the scope bounds after we know where the button row ends
     juce::Rectangle<int> scopeArea;
-
-    if (steveScope.isVisible())
-    {
-        // Scope area fills from baseHeight to bottom of window
-        scopeArea = juce::Rectangle<int>(0, baseHeight, getWidth(), getHeight() - baseHeight);
-    }
 
     // Use mainContentBounds instead of bounds for the 3-column layout
     bounds = mainContentBounds;
@@ -2465,19 +2533,21 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     bounds.removeFromRight(spacing);  // Gap between meters and main content
 
     // Proportional three-column layout: LEFT (Input) | CENTER (XY) | RIGHT (Output)
-    const int sideColumnWidth = static_cast<int>(300 * scale);
-    const int centerColumnWidth = static_cast<int>(520 * scale);
+    // Narrower side columns to give more space to XY pad
+    const int sideColumnWidth = static_cast<int>(280 * scale);
+    const int centerColumnWidth = static_cast<int>(490 * scale);
 
     // ========== LEFT SECTION (INPUT CONTROLS) ==========
     auto leftSection = bounds.removeFromLeft(sideColumnWidth).reduced(padding, 0);
 
     // === EVENLY SPACED LAYOUT ===
-    const int mainKnobSize = knobSize;                         // Input/Thresh knobs (70)
-    const int trimKnobSize = static_cast<int>(65 * scale);    // Processor trim knobs
-    const int msButtonSize = static_cast<int>(36 * scale);    // M/S buttons - BIGGER like before
-    const int calButtonWidth = static_cast<int>(36 * scale);
-    const int calButtonHeight = static_cast<int>(20 * scale);
-    const int labelWidth = static_cast<int>(50 * scale);
+    // Larger knobs with tighter spacing
+    const int mainKnobSize = static_cast<int>(72 * scale);     // Input/Thresh knobs (larger)
+    const int trimKnobSize = static_cast<int>(68 * scale);     // Processor trim knobs (larger)
+    const int msButtonSize = static_cast<int>(32 * scale);     // M/S buttons
+    const int calButtonWidth = static_cast<int>(38 * scale);
+    const int calButtonHeight = static_cast<int>(22 * scale);
+    const int labelWidth = static_cast<int>(70 * scale);       // Wider for full names
 
     // Calculate even row spacing - 6 main rows + reset button row
     const int totalRows = 7;  // Input, Thresh, Slow, Soft, Hard, Fast, Reset
@@ -2575,7 +2645,7 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     if (advancedPanel.isVisible())
     {
         const int advancedPanelWidth = static_cast<int>(600 * scale);  // Wider for two-column layout
-        const int advancedPanelHeight = static_cast<int>(312 * scale);  // 50% larger than previous (208 * 1.5)
+        const int advancedPanelHeight = static_cast<int>(280 * scale);  // Reduced height (horizontal gain comp layout)
         int advancedPanelY = advancedButtonY + advancedButtonHeight + static_cast<int>(8 * scale);
         int advancedPanelX = centerSection.getX() + (xyAvailableWidth - advancedPanelWidth) / 2;
         advancedPanel.setBounds(advancedPanelX, advancedPanelY, advancedPanelWidth, advancedPanelHeight);
@@ -2592,11 +2662,12 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     // Group 3: SCOPE (aligned with ADVANCED button)
     auto rightSection = bounds.reduced(padding, 0);
 
-    const int rightKnobSize = knobSize;
-    const int rightButtonWidth = static_cast<int>(100 * scale);
-    const int rightButtonHeight = static_cast<int>(28 * scale);
-    const int rightLabelWidth = static_cast<int>(55 * scale);
-    const int rightRowSpacing = static_cast<int>(8 * scale);
+    // Larger knobs with tighter spacing
+    const int rightKnobSize = static_cast<int>(72 * scale);     // Match left column knob size
+    const int rightButtonWidth = static_cast<int>(100 * scale); // Standard button width
+    const int rightButtonHeight = static_cast<int>(28 * scale); // Standard button height
+    const int rightLabelWidth = static_cast<int>(50 * scale);
+    const int rightRowSpacing = static_cast<int>(4 * scale);    // Tighter spacing to fit larger knobs
 
     // Center the knobs/buttons in the column
     const int rightColumnCenter = rightSection.getX() + rightSection.getWidth() / 2;
@@ -2622,6 +2693,10 @@ void QuadBlendDriveAudioProcessorEditor::resized()
 
     // DELTA MODE button
     deltaModeButton.setBounds(rightButtonX, currentY, rightButtonWidth, rightButtonHeight);
+    currentY += rightButtonHeight + rightRowSpacing;
+
+    // GAIN COMP button
+    masterCompButton.setBounds(rightButtonX, currentY, rightButtonWidth, rightButtonHeight);
     currentY += rightButtonHeight + rightRowSpacing;
 
     // Mix knob
@@ -2653,16 +2728,25 @@ void QuadBlendDriveAudioProcessorEditor::resized()
     resetTrimsButton.setBounds(resetTrimsX, advancedButtonY, resetTrimsWidth, advancedButtonHeight);
 
     // ========== RIGHT EDGE METERS (INPUT/OUTPUT) ==========
-    // Position input and output meters side-by-side from right edge: [IN] [OUT]
-    // Signal flow reads left to right
-    outputMeter.setBounds(meterArea.removeFromRight(meterWidth));
-    meterArea.removeFromRight(meterGap);  // Gap between meters
-    inputMeter.setBounds(meterArea.removeFromRight(meterWidth));
+    // Center meters between right controls and right edge of UI
+    // Calculate the space available: from right edge of right section to right edge of window
+    const int rightSectionRightEdge = rightSection.getRight();
+    const int windowRightEdge = getWidth();
+    const int availableMeterSpace = windowRightEdge - rightSectionRightEdge;
+    const int meterBlockWidth = (meterWidth * 2) + meterGap;
+    const int meterStartX = rightSectionRightEdge + (availableMeterSpace - meterBlockWidth) / 2;
+
+    // Position input and output meters side-by-side, centered
+    // Signal flow reads left to right: [IN] [OUT]
+    inputMeter.setBounds(meterStartX, meterArea.getY(), meterWidth, meterArea.getHeight());
+    outputMeter.setBounds(meterStartX + meterWidth + meterGap, meterArea.getY(), meterWidth, meterArea.getHeight());
 
     // ========== SCOPE AREA (when visible) ==========
     if (steveScope.isVisible())
     {
-        // STEVEScope fills the expanded area below 600px
+        // Scope starts below the button row (RESET TRIMS, ADVANCED, SCOPE buttons)
+        const int scopeStartY = advancedButtonY + advancedButtonHeight + static_cast<int>(8 * scale);
+        scopeArea = juce::Rectangle<int>(0, scopeStartY, getWidth(), getHeight() - scopeStartY);
         steveScope.setBounds(scopeArea.reduced(padding, padding));
     }
     else

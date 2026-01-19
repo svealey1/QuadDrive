@@ -1,9 +1,18 @@
 # Changelog
 
-All notable changes to S.T.E.V.E. (Signal Transfer Enhanced Volume Engine) will be documented in this file.
+All notable changes to Emulsion will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.8.7] - 2026-01-19 - "Emulsion Rebrand"
+
+### Project Rebrand
+Complete rebrand from "Bongo Juice/STEVE/QuadBlend Drive" to "Emulsion"
+- Updated plugin name, bundle ID, and product codes across all build files
+- Updated UI title and version display (v1.8.7)
+- Updated documentation (README.md, CHANGELOG.md)
+- Updated code comments to reflect new branding
 
 ## [1.8.5] - 2025-12-03 - "S.T.E.V.E. Rebrand + Display Refinements"
 
@@ -474,7 +483,7 @@ v1.5.0 returns to the principle: **simple processing + oversampling = pristine q
 ## [1.0.0] - 2025-11-21
 
 ### Added
-- Initial release of Quad-Blend Drive
+- Initial release of Emulsion (originally Quad-Blend Drive)
 - Four-stage drive/saturation processing
 - Blend controls for parallel processing
 - VST3 and AU format support

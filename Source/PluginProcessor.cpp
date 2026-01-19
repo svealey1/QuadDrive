@@ -80,6 +80,12 @@ QuadBlendDriveAudioProcessor::createParameterLayout()
         juce::String(), juce::AudioProcessorParameter::genericParameter,
         [](float value, int) { return juce::String(value, 2) + " ms"; }));
 
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        "FL_LIMIT_RELEASE", "Fast Limiter Release Time",
+        juce::NormalisableRange<float>(5.0f, 100.0f, 0.1f, 0.5f), 10.0f,
+        juce::String(), juce::AudioProcessorParameter::genericParameter,
+        [](float value, int) { return juce::String(value, 1) + " ms"; }));
+
     // Blending Parameters
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         "XY_X_PARAM", "X Position",
@@ -1269,6 +1275,7 @@ void QuadBlendDriveAudioProcessor::processBlockInternal(juce::AudioBuffer<Sample
     const SampleType limitRelMs = static_cast<SampleType>(apvts.getRawParameterValue("LIMIT_REL")->load());
     const SampleType slAttackMs = static_cast<SampleType>(apvts.getRawParameterValue("SL_LIMIT_ATTACK")->load());
     const SampleType flAttackMs = static_cast<SampleType>(apvts.getRawParameterValue("FL_LIMIT_ATTACK")->load());
+    const SampleType flReleaseMs = static_cast<SampleType>(apvts.getRawParameterValue("FL_LIMIT_RELEASE")->load());
 
     const SampleType hcTrimDB = static_cast<SampleType>(apvts.getRawParameterValue("HC_TRIM")->load());
     const SampleType scTrimDB = static_cast<SampleType>(apvts.getRawParameterValue("SC_TRIM")->load());
@@ -2781,14 +2788,15 @@ void QuadBlendDriveAudioProcessor::processSlowLimit(juce::AudioBuffer<SampleType
     }
 }
 
-// Fast Limiting - Hard knee limiting with fixed 10ms release
-// Attack: 1ms, Release: 10ms (fixed), Hard knee, Lookahead: 3ms
+// Fast Limiting - Hard knee limiting with user-adjustable release
+// Attack: 0.01-10ms, Release: 5-100ms, Hard knee, Lookahead: 3ms
 // MODE-AWARE: Zero Latency = no oversampling, Balanced/Linear Phase = 8x oversampling
 // CHANNEL LINKING: 0% = dual mono (independent), 100% = fully linked (max of both channels)
 template<typename SampleType>
 void QuadBlendDriveAudioProcessor::processFastLimit(juce::AudioBuffer<SampleType>& buffer,
                                                       SampleType threshold,
                                                       SampleType attackMs,
+                                                      SampleType releaseMs,
                                                       double sampleRate)
 {
     // Get current processing mode from osManager
@@ -2798,16 +2806,16 @@ void QuadBlendDriveAudioProcessor::processFastLimit(juce::AudioBuffer<SampleType
     const float channelLink = apvts.getRawParameterValue("CHANNEL_LINK")->load() / 100.0f;
     const bool isStereo = buffer.getNumChannels() >= 2;
 
-    // Fixed parameters for Fast Limiter
-    const double attackMsD = static_cast<double>(attackMs);  // User-adjustable attack
-    const double releaseMs = 10.0;                            // 10ms release (fixed)
+    // User-adjustable parameters for Fast Limiter
+    const double attackMsD = static_cast<double>(attackMs);
+    const double releaseMsD = static_cast<double>(releaseMs);
 
     // MODE 0: direct sample rate, MODE 1-2: oversampled rate
     const double safeSampleRate = (currentSampleRate > 0.0) ? currentSampleRate : 44100.0;
     const double effectiveRate = (processingMode == 0) ? safeSampleRate : (safeSampleRate * 8.0);
 
     const double attackCoeff = std::exp(-1.0 / (attackMsD * 0.001 * effectiveRate));
-    const double releaseCoeff = std::exp(-1.0 / (releaseMs * 0.001 * effectiveRate));
+    const double releaseCoeff = std::exp(-1.0 / (releaseMsD * 0.001 * effectiveRate));
     const double thresholdD = static_cast<double>(threshold);
 
     // Gain smoothing filter coefficient to prevent control signal aliasing
@@ -3701,6 +3709,7 @@ void QuadBlendDriveAudioProcessor::processXYBlend(juce::AudioBuffer<SampleType>&
     const SampleType limitRelMs = static_cast<SampleType>(apvts.getRawParameterValue("LIMIT_REL")->load());
     const SampleType slAttackMs = static_cast<SampleType>(apvts.getRawParameterValue("SL_LIMIT_ATTACK")->load());
     const SampleType flAttackMs = static_cast<SampleType>(apvts.getRawParameterValue("FL_LIMIT_ATTACK")->load());
+    const SampleType flReleaseMs = static_cast<SampleType>(apvts.getRawParameterValue("FL_LIMIT_RELEASE")->load());
 
     const SampleType hcTrimDB = static_cast<SampleType>(apvts.getRawParameterValue("HC_TRIM")->load());
     const SampleType scTrimDB = static_cast<SampleType>(apvts.getRawParameterValue("SC_TRIM")->load());
@@ -3831,7 +3840,7 @@ void QuadBlendDriveAudioProcessor::processXYBlend(juce::AudioBuffer<SampleType>&
     processSlowLimit(tempBuffer3, threshold, limitRelMs, slAttackMs, osSampleRate);
 
     tempBuffer4.applyGain(flTrimGain);
-    processFastLimit(tempBuffer4, threshold, flAttackMs, osSampleRate);
+    processFastLimit(tempBuffer4, threshold, flAttackMs, flReleaseMs, osSampleRate);
 
     // Apply compensation gains if enabled
     const bool masterCompEnabled = apvts.getRawParameterValue("MASTER_COMP")->load() > 0.5f;
@@ -3977,8 +3986,8 @@ template void QuadBlendDriveAudioProcessor::processSoftClip<double>(juce::AudioB
 template void QuadBlendDriveAudioProcessor::processSlowLimit<float>(juce::AudioBuffer<float>&, float, float, float, double);
 template void QuadBlendDriveAudioProcessor::processSlowLimit<double>(juce::AudioBuffer<double>&, double, double, double, double);
 
-template void QuadBlendDriveAudioProcessor::processFastLimit<float>(juce::AudioBuffer<float>&, float, float, double);
-template void QuadBlendDriveAudioProcessor::processFastLimit<double>(juce::AudioBuffer<double>&, double, double, double);
+template void QuadBlendDriveAudioProcessor::processFastLimit<float>(juce::AudioBuffer<float>&, float, float, float, double);
+template void QuadBlendDriveAudioProcessor::processFastLimit<double>(juce::AudioBuffer<double>&, double, double, double, double);
 
 template void QuadBlendDriveAudioProcessor::processOvershootSuppression<float>(juce::AudioBuffer<float>&, float, double, bool, juce::AudioBuffer<float>*);
 template void QuadBlendDriveAudioProcessor::processOvershootSuppression<double>(juce::AudioBuffer<double>&, double, double, bool, juce::AudioBuffer<double>*);

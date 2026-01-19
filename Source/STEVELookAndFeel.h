@@ -3,7 +3,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 /**
- * @brief Professional mastering-grade look and feel for S.T.E.V.E.
+ * @brief Professional mastering-grade look and feel for Emulsion
  * Inspired by Shadow Hills and iZotope aesthetics
  */
 class STEVELookAndFeel : public juce::LookAndFeel_V4
@@ -146,6 +146,11 @@ public:
             const bool isHorizontal = style == juce::Slider::LinearHorizontal;
             const float trackThickness = 4.0f;
 
+            // Get accent color - use slider's thumbColourId if set, otherwise default accentBlue
+            juce::Colour fillColour = slider.isColourSpecified(juce::Slider::thumbColourId)
+                ? slider.findColour(juce::Slider::thumbColourId)
+                : juce::Colour(accentBlue);
+
             juce::Rectangle<float> track;
             if (isHorizontal)
             {
@@ -175,7 +180,7 @@ public:
                                               track.getWidth(), track.getBottom() - sliderPos);
             }
 
-            g.setColour(juce::Colour(accentBlue));
+            g.setColour(fillColour);
             g.fillRoundedRectangle(fill, 2.0f);
 
             // Thumb

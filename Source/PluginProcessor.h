@@ -11,7 +11,7 @@
  */
 struct ProcessorColors
 {
-    // Default colors match STEVEScope GR colors
+    // Default colors match EmulsionScope GR colors
     juce::Colour hardClip  { 0xffff5050 };  // Red
     juce::Colour softClip  { 0xffff963c };  // Orange
     juce::Colour slowLimit { 0xffffdc50 };  // Yellow
@@ -286,7 +286,7 @@ private:
     void processSlowLimit(juce::AudioBuffer<SampleType>& buffer, SampleType threshold, SampleType releaseMs, SampleType attackMs, double sampleRate);
 
     template<typename SampleType>
-    void processFastLimit(juce::AudioBuffer<SampleType>& buffer, SampleType threshold, SampleType attackMs, double sampleRate);
+    void processFastLimit(juce::AudioBuffer<SampleType>& buffer, SampleType threshold, SampleType attackMs, SampleType releaseMs, double sampleRate);
 
     // Overshoot suppression (true-peak safety with 8x oversampling)
     template<typename SampleType>

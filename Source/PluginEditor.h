@@ -85,10 +85,11 @@ private:
 };
 
 // Calibration Panel (Collapsible)
-class CalibrationPanel : public juce::Component
+class CalibrationPanel : public juce::Component, private juce::Timer
 {
 public:
     CalibrationPanel(juce::AudioProcessorValueTreeState& apvts, QuadBlendDriveAudioProcessor& processor);
+    ~CalibrationPanel() override;
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -104,6 +105,8 @@ public:
     bool isNormalizationEnabled() const { return normalizeButton.getToggleState(); }
 
 private:
+    void timerCallback() override;
+
     juce::AudioProcessorValueTreeState& apvts;
     QuadBlendDriveAudioProcessor& processor;
 
@@ -153,7 +156,10 @@ private:
 
     // Fast Limiter controls
     juce::Slider flLimitAttackSlider;
-    juce::Label flLimitAttackLabel;
+    juce::Label flLimitAttackLabel;       // Section header "FAST LIMITER"
+    juce::Label flLimitAttackTimeLabel;   // "Attack:" label for slider
+    juce::Slider flLimitReleaseSlider;
+    juce::Label flLimitReleaseLabel;
 
     // Gain Compensation controls
     juce::ToggleButton hcCompButton, scCompButton, slCompButton, flCompButton;
@@ -182,6 +188,7 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> limitRelAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> slLimitAttackAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> flLimitAttackAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> flLimitReleaseAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> hcCompAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> scCompAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> slCompAttachment;

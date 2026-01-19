@@ -1,12 +1,13 @@
-# Quad-Blend Drive
+# Emulsion
 
-A four-stage drive and saturation audio plugin with parallel processing capabilities.
+A four-stage drive and saturation audio plugin with parallel XY-blend processing.
 
 ## Features
 
-- Four independent drive/saturation stages
-- Parallel blend controls for each stage
-- Flexible routing options
+- Four independent drive/saturation stages (Hard Clip, Soft Clip, Slow Limit, Fast Limit)
+- XY pad for intuitive parallel blend control
+- Comprehensive visualization (waveform scope, transfer curve, GR meters)
+- Advanced true-peak limiting with overshoot suppression
 - VST3 and AU formats
 - macOS native support
 
@@ -22,8 +23,8 @@ A four-stage drive and saturation audio plugin with parallel processing capabili
 
 ```bash
 # Clone with submodules
-git clone --recursive https://github.com/svealey1/QuadDrive.git
-cd QuadDrive
+git clone --recursive https://github.com/svealey1/Emulsion.git
+cd Emulsion
 
 # Configure and build
 cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -33,8 +34,8 @@ cmake --build build --config Release
 ### Build Output
 
 Built plugins will be automatically copied to:
-- VST3: `~/Library/Audio/Plug-Ins/VST3/Quad-Blend Drive.vst3`
-- AU: `~/Library/Audio/Plug-Ins/Components/Quad-Blend Drive.component`
+- VST3: `~/Library/Audio/Plug-Ins/VST3/Emulsion.vst3`
+- AU: `~/Library/Audio/Plug-Ins/Components/Emulsion.component`
 
 ## Testing
 
@@ -54,6 +55,6 @@ Copyright © 2025 Steve Vealey. All rights reserved.
 
 ## Version
 
-Current version: 1.0.0
+Current version: 1.8.7
 
 See [CHANGELOG.md](CHANGELOG.md) for version history.

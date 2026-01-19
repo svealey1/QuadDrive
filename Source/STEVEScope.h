@@ -4,7 +4,7 @@
 #include "PluginProcessor.h"
 
 /**
- * STEVEScope - Mega Scope-inspired waveform and GR visualization
+ * EmulsionScope - Mega Scope-inspired waveform and GR visualization
  *
  * Features:
  * - Smooth waveform rendering using decimated display buffer

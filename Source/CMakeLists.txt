@@ -1,10 +1,10 @@
-juce_add_plugin(STEVE
+juce_add_plugin(Emulsion
     COMPANY_NAME "Steve Vealey"
-    BUNDLE_ID com.SteveVealey.STEVE
+    BUNDLE_ID com.SteveVealey.Emulsion
     PLUGIN_MANUFACTURER_CODE SvVy
-    PLUGIN_CODE Stve
+    PLUGIN_CODE Emul
     FORMATS VST3 AU
-    PRODUCT_NAME "STEVE"
+    PRODUCT_NAME "Emulsion"
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT FALSE
@@ -14,7 +14,7 @@ juce_add_plugin(STEVE
 )
 
 # Add source files
-target_sources(STEVE
+target_sources(Emulsion
     PRIVATE
         PluginProcessor.cpp
         PluginEditor.cpp
@@ -26,7 +26,7 @@ target_sources(STEVE
 )
 
 # Link JUCE modules
-target_link_libraries(STEVE
+target_link_libraries(Emulsion
     PRIVATE
         juce::juce_audio_utils
         juce::juce_dsp
@@ -37,7 +37,7 @@ target_link_libraries(STEVE
 )
 
 # Compile definitions
-target_compile_definitions(STEVE
+target_compile_definitions(Emulsion
     PUBLIC
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
